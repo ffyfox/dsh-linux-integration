@@ -145,11 +145,16 @@ dsh plugin --profile web exec dsh-lxi set window 1400x900
 
 ### 设置页卡片与 config.json 的关系
 
-卡片写入的是 DSH 的 `settings.yaml`（命名空间 `linux-desktop`），它叠在 `config.json` **之上**：生效值 = schema 默认值 → `config.json` → `settings.yaml` 用户覆盖。因此已有的 `config.json` 继续生效，不需要迁移；卡片里改过的字段会显示「已覆盖」，点「重置」即回落到 `config.json` 的值。
+卡片写入的是 DSH 的设置层（本插件的命名空间 `dsh-lxi`），它叠在 `config.json` **之上**：生效值 = schema 默认值 → `config.json` → 设置层用户覆盖。因此已有的 `config.json` 继续生效，不需要迁移；卡片里改过的字段会显示「已覆盖」，点「重置」即回落到 `config.json` 的值。
 
 `host` 与 `port` 不在卡片里。它们必须与 `dsh web` 实际绑定的地址一致，只由 `config.json` 决定。
 
 卡片依赖 `@deepseek-ai/schemastery`（安装时会作为依赖装上）。若用本地检出（`link:`）方式安装且该包不可用，卡片不会出现，桌面集成其余部分照常工作。
+
+> ⚠️ **已知问题：DSH 0.2.x 上这张卡片不再出现。**
+> DSH 0.2 换掉了设置机制 —— `settings.yaml` 那套「插件自选命名空间」的模型被移除，改成由插件导出的 `Config` schema **按插件行 id 自动派生表单**，值存进 profile 补丁文档；`ctx.settings.installSection` 这个方法在新版里已经不存在。
+> 本插件尚未适配，那次调用会失败并被内部的 `try/catch` 吞掉，所以**只有这张卡片消失，桌面集成其余功能一切照常**（`dsh web` 不会因此起不来）。适配单独排期。
+> 在此之前请用 `config.json` 或 `dsh-lxi set` 改配置 —— 这两条路都不受影响。
 
 ### profileMode
 
@@ -304,7 +309,7 @@ dsh plugin --profile web exec dsh-lxi doctor
 在仓库根目录执行：
 
 ```bash
-node test/smoke.mjs                                   # 冒烟测试，用例共 158 项，零依赖
+node test/smoke.mjs                                   # 冒烟测试，用例共 169 项，零依赖
 node scripts/prepublish-check.mjs                     # 发布前校验
 npm pack --dry-run                                    # 校验打包产物
 node bin/dsh-lxi.js install --root /tmp/sandbox   # 沙箱安装，不触碰真实目录

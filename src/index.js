@@ -29,8 +29,15 @@ import { resolvePaths } from './paths.js'
 import { clearRuntime, writeRuntime } from './runtime.js'
 import { installSettingsNamespace, settingsBase } from './settings.js'
 
-/** Cordis 插件名（出现在 Loader 树与诊断里）。 */
-export const name = 'linux-desktop'
+/**
+ * Cordis 插件名（出现在 Loader 树与诊断里）。
+ *
+ * 必须与 `cordis.patch.yml` 里的行 `id` 一致 —— 那是这一行在 Loader 树里的身份。
+ * 2026-10-06 由 `linux-desktop` 改为 `dsh-lxi`：0.6.0 那次整体更名漏了它，
+ * 而新版 DSH 的设置表单正是**按行 id 键控**的（见 `src/settings.js` 的说明），
+ * 所以这个名字会变成永久的设置存储键，越早定下来越好。
+ */
+export const name = 'dsh-lxi'
 
 /**
  * 声明依赖的两个宿主服务。
@@ -58,18 +65,18 @@ export function apply(ctx) {
 
   const log = (...args) => {
     try {
-      const logger = ctx.logger?.('linux-desktop')
+      const logger = ctx.logger?.('dsh-lxi')
       if (logger?.info) logger.info(...args)
-      else if (env.DSH_DESKTOP_DEBUG === '1') console.error('[linux-desktop]', ...args)
+      else if (env.DSH_DESKTOP_DEBUG === '1') console.error('[dsh-lxi]', ...args)
     } catch {
       // 日志本身绝不能成为失败源。
     }
   }
   const warn = (...args) => {
     try {
-      const logger = ctx.logger?.('linux-desktop')
+      const logger = ctx.logger?.('dsh-lxi')
       if (logger?.warn) logger.warn(...args)
-      else if (env.DSH_DESKTOP_DEBUG === '1') console.error('[linux-desktop]', ...args)
+      else if (env.DSH_DESKTOP_DEBUG === '1') console.error('[dsh-lxi]', ...args)
     } catch {
       /* ignore */
     }

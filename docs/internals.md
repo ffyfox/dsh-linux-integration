@@ -43,7 +43,7 @@ docs/               实现细节
 
 ```
 dsh web 进程
-   └── 插件行 linux-desktop（inject: connection + webServer）
+   └── 插件行 dsh-lxi（inject: connection + webServer）
          ├── ctx.connection.authenticatedUrl()  → 带 token 的地址
          ├── ctx.webServer.port                 → 实际端口
          └── 写入 $XDG_RUNTIME_DIR/dsh-lxi/runtime.env   (0600)
@@ -193,7 +193,20 @@ GNOME 既没有窗口规则配置文件，也没有对应的 dconf 键 —— �
 
 所以正确写法是 `ctx.get('settingsScope')?.bind?.(…) ?? ctx.get('configForms')?.get(…)`：`ctx.get()` 对不存在的服务返回 `undefined` 而不是抛异常，`??` 再兜到新名字上。最后再加一道 `if (!scope) return` —— 客户端插件行抛异常会连累整个界面，而这张卡片只是锦上添花。
 
-`test/smoke.mjs` 里有一节专门钉这三件事：`inject` 里不许出现 `settingsScope`、新名字下卡片照常注册、两个服务都没有时不抛异常。做法是把 `src/client.js` 当浏览器 bundle 真跑一遍（假 `window.__ModuleLoader__` + 假 `require`），因此这个文件第一次有了测试。
+**但在 DSH 0.2.x 上这条路已经断了**（2026-10-06 实测）。`dsh-settings` 把整个命名空间模型换掉了：
+
+| | ≤0.1.x | 0.2.x |
+| --- | --- | --- |
+| 插件怎么声明设置 | `ctx.settings.installSection(命名空间, schema, …)` | **没有这个方法了**（整个 0.2.0-rc.2 / 0.2.1-alpha.1 都搜不到） |
+| schema 从哪来 | 插件自己传 | DSH 读插件模块导出的 `Config`（`entry.fiber.runtime.Config`） |
+| 键是什么 | 插件自选的命名空间名 | **插件行的 id** |
+| 值存哪 | `<profile>/settings.yaml` 分节 | profile 补丁文档（`cordis.patch.yml`）里的 `- id: …` + `config:` |
+
+所以宿主半侧那次 `installSection` 调用现在会抛 `TypeError`，被 `src/settings.js` 的 try/catch 吞掉并 warn —— **卡片在 0.2.x 上静默消失**，其余功能不受影响。老的 `<profile>/settings.yaml` 会被 DSH 改名成 `.imported` 并把每节导入同名条目（DSH 自己维护一张历史别名表）。
+
+适配新机制的方向是**导出 `Config` schema**、让 DSH 自动生成表单，那样自绘卡片（`src/client.js` 大半）可能整个删掉。单独排期。
+
+`test/smoke.mjs` 里有一节专门钉这三件事：`inject` 里不许出现 `settingsScope`、新名字下卡片照常注册、两个服务都没有时不抛异常。做法是把 `src/client.js` 当浏览器 bundle 真跑一遍（假 `window.__ModuleLoader__` + 假 `require`），因此这个文件第一次有了测试。另有一条用例钉住「补丁行 id / 插件 `name` / `SETTINGS_NAMESPACE` / 客户端 `NAMESPACE` 四处一致」。
 
 ---
 

@@ -146,11 +146,16 @@ dsh plugin --profile web exec dsh-lxi set window 1400x900
 
 ### The settings card and config.json
 
-The card writes to DSH's `settings.yaml` (namespace `linux-desktop`), which layers **on top of** `config.json`: the effective value is schema defaults → `config.json` → the `settings.yaml` user layer. An existing `config.json` therefore keeps working and needs no migration; a field the card changed shows as "Overridden", and "Reset" drops it back to the `config.json` value.
+The card writes to DSH's settings layer (this plugin's namespace is `dsh-lxi`), which layers **on top of** `config.json`: the effective value is schema defaults → `config.json` → the user layer. An existing `config.json` therefore keeps working and needs no migration; a field the card changed shows as "Overridden", and "Reset" drops it back to the `config.json` value.
 
 `host` and `port` are not on the card. They must match the address `dsh web` actually binds, so `config.json` remains their only source.
 
 The card depends on `@deepseek-ai/schemastery` (installed as a dependency). If you installed from a local checkout (`link:`) and that package is unavailable, the card does not appear; the rest of the desktop integration works as usual.
+
+> ⚠️ **Known issue: on DSH 0.2.x this card no longer appears.**
+> DSH 0.2 replaced the settings mechanism — the old `settings.yaml` model, where a plugin picked its own namespace, is gone. Forms are now derived from a `Config` schema the plugin exports, keyed by the plugin's row id, and stored in the profile patch document. `ctx.settings.installSection` no longer exists in that API.
+> This plugin has not been ported yet, so that call fails and is swallowed by its internal `try/catch`: **only this card disappears — the rest of the desktop integration is unaffected** (`dsh web` will not fail to start because of it). Porting is scheduled separately.
+> Until then, change settings through `config.json` or `dsh-lxi set`; neither is affected.
 
 ### profileMode
 
@@ -305,7 +310,7 @@ dsh plugin --profile web exec dsh-lxi doctor
 Run these from the repository root:
 
 ```bash
-node test/smoke.mjs                                   # smoke tests, 158 checks total, zero dependencies
+node test/smoke.mjs                                   # smoke tests, 169 checks total, zero dependencies
 node scripts/prepublish-check.mjs                     # pre-publish validation
 npm pack --dry-run                                    # validate the package contents
 node bin/dsh-lxi.js install --root /tmp/sandbox   # sandboxed install, touches nothing real

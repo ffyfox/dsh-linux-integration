@@ -8,5 +8,5 @@
 # 这两个服务的 profile 里，这一行会停留在 PENDING 状态而不激活 —— 这正是我们
 # 想要的：桌面集成只在 dsh web 里生效，不影响其它 profile。
 - insert:
-    - id: linux-desktop
+    - id: dsh-lxi
       name: dsh-linux-integration

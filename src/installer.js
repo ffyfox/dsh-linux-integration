@@ -34,7 +34,7 @@ import {
   verifyRuleBlock,
   versionAtLeast,
 } from './hyprland.js'
-import { ICON_NAME, ICON_SIZES, iconDirFor, iconFileFor, resolvePaths } from './paths.js'
+import { ICON_NAME, ICON_SIZES, RETIRED_ICON_NAMES, iconDirFor, iconFileFor, resolvePaths } from './paths.js'
 import { inspectRuntime } from './runtime.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -126,6 +126,48 @@ function resizePng(srcFile, pngFile, size) {
     }
   }
   return null
+}
+
+/**
+ * 本插件以前是否在这个位置装过东西。
+ *
+ * 判据是桌面入口第一行那句生成标记 —— 那是本插件自己写的，别的软件不会这么写。
+ * 标记里带着**当时的包名**，所以这里只匹配固定不变的首尾，不写死任何一个包名：
+ * 0.1.0~0.5.x 写的是 `dsh-linux-desktop`，0.6.x 起写的是 `dsh-linux-integration`，
+ * 绑当前包名的话，老用户升级上来会被判成「没装过」，迁移就静默失效了。
+ *
+ * 为什么需要这道闸：退役的图标名是**全局命名空间**里的普通名字，全新机器上同名的
+ * 文件属于别人。只有先确认这里装过本插件，那些文件才可能真的是我们写的。
+ *
+ * @param {ReturnType<typeof resolvePaths>} paths
+ * @returns {boolean}
+ */
+function installedHereBefore(paths) {
+  try {
+    return /^# 由 dsh[^ ]* 生成，请勿手工编辑 ——/m.test(fs.readFileSync(paths.desktopEntryFile, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 历史遗留图标（退役名 × 尺寸档位，外加 0.1.x 在 scalable/apps 下写过的矢量图）。
+ *
+ * 抽成一处是因为 install 与 uninstall 两侧都要清它 —— 抄两份迟早漂移。
+ *
+ * @param {ReturnType<typeof resolvePaths>} paths
+ * @returns {Array<{ id: string, file: string }>}
+ */
+function retiredIconFiles(paths) {
+  const legacyDir = path.join(paths.iconThemeDir, 'scalable', 'apps')
+  const files = []
+  for (const name of RETIRED_ICON_NAMES) {
+    for (const size of ICON_SIZES) {
+      files.push({ id: `icon-retired-${name}-${String(size)}`, file: iconFileFor(paths.iconThemeDir, size, name) })
+    }
+    files.push({ id: `icon-retired-${name}-svg`, file: path.join(legacyDir, `${name}.svg`) })
+  }
+  return files
 }
 
 /** 文件修改时间（毫秒）；不存在返回 0（用于判断资源是否比产物新）。 */
@@ -347,19 +389,35 @@ export function install(options = {}) {
     if (installedSizes === 0) record('icon', 'failed', '没有任何尺寸档位安装成功')
 
     // 迁移：0.1.x 在 scalable/apps 下装过矢量图标。图标主题会优先命中矢量图，
-    // 留着它就会让新图标永远不生效，所以升级时主动清掉（连同 app_id 别名）。
-    const legacyDir = path.join(paths.iconThemeDir, 'scalable', 'apps')
-    for (const [id, file] of [
-      ['icon-svg-legacy', path.join(legacyDir, `${ICON_NAME}.svg`)],
-      ['icon-svg-legacy-alias', path.join(legacyDir, `${aliasIconName(appId)}.svg`)],
-    ]) {
-      if (!fs.existsSync(file)) continue
+    // 留着它就会让新图标永远不生效，所以升级时主动清掉 app_id 别名那一个。
+    const aliasSvg = path.join(paths.iconThemeDir, 'scalable', 'apps', `${aliasIconName(appId)}.svg`)
+    if (fs.existsSync(aliasSvg)) {
       try {
-        fs.rmSync(file)
-        record(id, 'removed', file)
+        fs.rmSync(aliasSvg)
+        record('icon-svg-legacy-alias', 'removed', aliasSvg)
       } catch (error) {
-        record(id, 'failed', `${file}：${error.message}`)
+        record('icon-svg-legacy-alias', 'failed', `${aliasSvg}：${error.message}`)
       }
+    }
+
+    // 清理退役图标名：早期版本把位图写进了**用户级** hicolor，而用户级优先级高于
+    // `/usr/share` —— 名字与别人相同，就会一直遮挡对方合法的图标。名字换了以后这些
+    // 文件成了孤儿，不主动清掉，已经装过的机器就永远修不好。
+    if (installedHereBefore(paths)) {
+      let retired = 0
+      for (const { id, file } of retiredIconFiles(paths)) {
+        if (!fs.existsSync(file)) continue
+        try {
+          fs.rmSync(file)
+          record(id, 'removed', file)
+          retired += 1
+        } catch (error) {
+          record(id, 'failed', `${file}：${error.message}`)
+        }
+      }
+      if (retired === 0) record('icon-retired', 'absent', '没有历史图标需要清理')
+    } else {
+      record('icon-retired', 'skipped', '未发现本插件的安装痕迹，不动同名文件')
     }
   } catch (error) {
     record('icon', 'failed', error.message)
@@ -386,6 +444,7 @@ export function install(options = {}) {
       LOG_FILE: paths.logFile,
       DSH_BIN: dshBin,
       EXTRA_PATH: extraPath,
+      ICON_NAME,
     })
     const result = writeManagedFile(paths.launcherFile, script, { mode: 0o755 })
     fs.chmodSync(paths.launcherFile, 0o755)
@@ -635,10 +694,14 @@ export function uninstall(options = {}) {
   for (const size of ICON_SIZES) {
     targets.push([`icon-${String(size)}`, iconFileFor(paths.iconThemeDir, size)])
   }
-  // 0.1.x 装的是 scalable/apps 下的矢量图标。升级不会让旧文件自己消失，留着
-  // 会让图标主题继续命中旧图，所以卸载时一并清理。
+  // 历史遗留：退役图标名下的位图与矢量图。升级不一定会跑到（例如关过 autoInstall），
+  // 所以卸载时也清一遍，否则它们会继续遮挡同名的合法图标。
+  // 同样上闸：只有确认这里装过本插件才动 —— 全新机器上同名文件是别人的。
+  if (installedHereBefore(paths)) {
+    for (const { id, file } of retiredIconFiles(paths)) targets.push([id, file])
+  }
+
   const legacyIconDir = path.join(paths.iconThemeDir, 'scalable', 'apps')
-  targets.push(['icon-svg-legacy', path.join(legacyIconDir, `${ICON_NAME}.svg`)])
 
   // 别名文件的文件名取决于 app_id，需要从主入口里读回来。
   try {

@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 
 import { connectHost, defaultConfig, normalizeConfig } from '../src/config.js'
 import { detectBrowsers, detectDesktopEnvironment, findExecutable, resolveBrowser } from '../src/detect.js'
-import { chromiumAppId, escapeExecArg, renderDesktopEntry } from '../src/desktop-entry.js'
+import { aliasEntryFilename, chromiumAppId, escapeExecArg, renderAliasEntry, renderDesktopEntry } from '../src/desktop-entry.js'
 import { install, renderTemplate, status, uninstall, writeConfig } from '../src/installer.js'
 import { getKey, parseKconfig, removeSizeRule, serializeKconfig, setKey, upsertSizeRule } from '../src/kwin.js'
 import {
@@ -43,7 +43,7 @@ import {
   readAutoMaximize,
   readGnomeWorkArea,
 } from '../src/gnome.js'
-import { ICON_SIZES, iconDirFor, iconFileFor, resolvePaths } from '../src/paths.js'
+import { ICON_NAME, ICON_SIZES, RETIRED_ICON_NAMES, iconDirFor, iconFileFor, resolvePaths } from '../src/paths.js'
 import { clearRuntime, inspectRuntime, isProcessAlive, readRuntime, writeRuntime } from '../src/runtime.js'
 import { createSettingsSchema, SETTINGS_FIELDS, SETTINGS_NAMESPACE, settingsBase } from '../src/settings.js'
 import { findListeningPid, isDshWebProcess, resolveServerTarget, stopServerProcess } from '../src/server.js'
@@ -188,14 +188,14 @@ await test('渲染出的入口包含 app_id 与启动器路径', () => {
     config: defaultConfig(),
     launcherPath: '/home/u/.local/bin/dsh-lxi-app',
     appId: 'chrome-127.0.0.1__-Default',
-    iconName: 'deepseek-harness',
+    iconName: ICON_NAME,
     terminalCommand: '',
     version: '9.9.9',
   })
   assert.match(content, /^\[Desktop Entry\]$/m)
   assert.match(content, /^StartupWMClass=chrome-127\.0\.0\.1__-Default$/m)
   assert.match(content, /^Exec=\/home\/u\/\.local\/bin\/dsh-lxi-app %U$/m)
-  assert.match(content, /^Icon=deepseek-harness$/m)
+  assert.match(content, new RegExp(`^Icon=${ICON_NAME}$`, 'm'))
   assert.match(content, /^Terminal=false$/m)
   assert.ok(!content.includes('Actions='), '没有终端命令时不应有 Actions 行')
 })
@@ -218,7 +218,7 @@ await test('配置了 devProfile 时生成「以开发配置运行」动作', ()
     config: { ...defaultConfig(), devProfile: 'web-dev' },
     launcherPath: '/home/u/.local/bin/dsh-lxi-app',
     appId: 'chrome-127.0.0.1__-Default',
-    iconName: 'deepseek-harness',
+    iconName: ICON_NAME,
     terminalCommand: '',
     devAction: { profile: 'web-dev', port: 3081, root: '/home/u/.cache/dsh-lxi-dev' },
     version: '9.9.9',
@@ -258,6 +258,52 @@ await test('终端动作与开发动作同时存在时顺序稳定', () => {
   })
   assert.match(content, /^Actions=TUI;Dev;$/m)
   assert.ok(content.indexOf('[Desktop Action TUI]') < content.indexOf('[Desktop Action Dev]'))
+})
+
+// 别名入口是给桌面环境按 app_id 找图标用的完整副本，但它同时也是启动器会读的
+// 合法入口 —— 少了 NoDisplay 就会出现「程序菜单里两个一模一样的 DeepSeek Harness」。
+const sampleMainEntry = () =>
+  renderDesktopEntry({
+    config: defaultConfig(),
+    launcherPath: '/home/u/.local/bin/dsh-lxi-app',
+    appId: 'chrome-127.0.0.1__-Default',
+    iconName: ICON_NAME,
+    terminalCommand: '/usr/bin/konsole -e dsh --profile dsh-tui',
+    version: '9.9.9',
+  })
+
+await test('别名入口比主入口多一行 NoDisplay=true', () => {
+  const main = sampleMainEntry()
+  const alias = renderAliasEntry(main)
+  assert.match(alias, /^NoDisplay=true$/m, '别名入口必须带 NoDisplay，否则启动器里同一项列两遍')
+  assert.doesNotMatch(main, /^NoDisplay=true$/m, '主入口不能有 NoDisplay —— 那一份才是给人点的')
+})
+
+await test('别名入口除注释与 NoDisplay 外与主入口逐行等同', () => {
+  const main = sampleMainEntry()
+  const alias = renderAliasEntry(main)
+  const meaningful = (text) =>
+    text
+      .split('\n')
+      .filter((line) => !line.startsWith('#') && line !== 'NoDisplay=true')
+  assert.deepEqual(
+    meaningful(alias),
+    meaningful(main),
+    '两份入口除注释与 NoDisplay 外必须一致，否则任务栏图标与菜单项会对不上',
+  )
+})
+
+await test('别名入口文件名等于 app_id（合成器就是按这个名字找图标）', () => {
+  const appId = chromiumAppId({ host: '127.0.0.1', urlPath: '/', profileName: 'Default' })
+  assert.equal(aliasEntryFilename(appId), 'chrome-127.0.0.1__-Default.desktop')
+})
+
+await test('主入口缺少 Terminal=false 锚点时抛错，不静默退化成两个入口', () => {
+  assert.throws(
+    () => renderAliasEntry('[Desktop Entry]\nName=x\n'),
+    /Terminal=false/,
+    '锚点丢了必须当场炸 —— 静默通过就等于又把重复项放回启动器',
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1387,7 @@ await test('全部占位符被替换后不残留 @@..@@', () => {
   const keys = [
     'VERSION', 'CONFIG_FILE', 'HOST', 'PORT', 'WINDOW_SIZE', 'BROWSER', 'BROWSER_LABEL',
     'PROFILE_MODE', 'PROFILE', 'PROFILE_DIR', 'RUNTIME_DIR', 'LOG_FILE', 'DSH_BIN', 'EXTRA_PATH',
+    'ICON_NAME',
   ]
   const values = Object.fromEntries(keys.map((k) => [k, `V-${k}`]))
   const output = renderTemplate(template, values)
@@ -1357,9 +1404,21 @@ await test('模板里不存在被误当成占位符的其它 @@ 结构', () => {
   const found = [...template.matchAll(/@@([A-Z_]+)@@/g)].map((m) => m[1])
   const unique = [...new Set(found)].sort()
   assert.deepEqual(unique, [
-    'BROWSER', 'BROWSER_LABEL', 'CONFIG_FILE', 'DSH_BIN', 'EXTRA_PATH', 'HOST', 'LOG_FILE',
-    'PORT', 'PROFILE', 'PROFILE_DIR', 'PROFILE_MODE', 'RUNTIME_DIR', 'VERSION', 'WINDOW_SIZE',
+    'BROWSER', 'BROWSER_LABEL', 'CONFIG_FILE', 'DSH_BIN', 'EXTRA_PATH', 'HOST', 'ICON_NAME',
+    'LOG_FILE', 'PORT', 'PROFILE', 'PROFILE_DIR', 'PROFILE_MODE', 'RUNTIME_DIR', 'VERSION', 'WINDOW_SIZE',
   ])
+})
+
+await test('通知用的是本插件自己的图标名', () => {
+  const template = fs.readFileSync(path.join(ROOT, 'src/assets/launcher.sh.tpl'), 'utf8')
+  // 这是模板里唯一一处要用到图标名的地方，也是唯一容易写死的地方。写死成别人的名字，
+  // 通知就会显示成对方的图标 —— 所以必须走占位符，由 installer 注入 ICON_NAME。
+  assert.match(template, /notify-send\b[^\n]*--icon=@@ICON_NAME@@/, 'notify-send 的图标必须走 @@ICON_NAME@@ 占位符')
+
+  const keys = [...new Set([...template.matchAll(/@@([A-Z_]+)@@/g)].map((m) => m[1]))]
+  const values = Object.fromEntries(keys.map((k) => [k, k === 'ICON_NAME' ? ICON_NAME : `V-${k}`]))
+  const script = renderTemplate(template, values)
+  assert.match(script, new RegExp(`--icon=${ICON_NAME} `), `渲染后应注入当前图标名 ${ICON_NAME}`)
 })
 
 await test('启动脚本用 --profile 拉起，不再硬编码 web 子命令', () => {
@@ -1399,6 +1458,7 @@ await test('渲染出的启动脚本语法合法', () => {
   const keys = [
     'VERSION', 'CONFIG_FILE', 'HOST', 'PORT', 'WINDOW_SIZE', 'BROWSER', 'BROWSER_LABEL',
     'PROFILE_MODE', 'PROFILE', 'PROFILE_DIR', 'RUNTIME_DIR', 'LOG_FILE', 'DSH_BIN', 'EXTRA_PATH',
+    'ICON_NAME',
   ]
   const script = renderTemplate(template, Object.fromEntries(keys.map((k) => [k, `V-${k}`])))
   const file = path.join(makeSandbox('tplsyntax'), 'launcher.sh')
@@ -1843,6 +1903,122 @@ await test('uninstall 幂等：再次执行不报错', () => {
 fs.rmSync(installSandbox, { recursive: true, force: true })
 
 // ---------------------------------------------------------------------------
+section('图标名与历史遗留清理')
+// ---------------------------------------------------------------------------
+
+/** 造出「本插件以前在这里装过」的既成事实：退役名图标 + 带生成标记的桌面入口。 */
+function plantLegacyInstall(paths, marker) {
+  const planted = []
+  for (const size of ICON_SIZES) {
+    const file = iconFileFor(paths.iconThemeDir, size, RETIRED_ICON_NAMES[0])
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, `legacy-${String(size)}`)
+    planted.push(file)
+  }
+  fs.mkdirSync(path.dirname(paths.desktopEntryFile), { recursive: true })
+  fs.writeFileSync(paths.desktopEntryFile, `# 由 ${marker} 生成，请勿手工编辑 ——\n[Desktop Entry]\n`)
+  return planted
+}
+
+await test('当前图标名不在任何已退役的名字里', () => {
+  // 图标名是全局命名空间：主题按名字查找，谁都能占用同一个名字。官方 Electron 桌面端
+  // 用的就是 deepseek-harness，本插件早期也用了这个名字，还把它写进**用户级** hicolor
+  // （优先级高于 /usr/share），于是两边互相串图。这条把「不再复用别人的名字」钉死。
+  assert.ok(
+    !RETIRED_ICON_NAMES.includes(ICON_NAME),
+    `ICON_NAME（${ICON_NAME}）不能是被退役的名字，否则历史清理会把当前图标一起删掉`,
+  )
+  assert.ok(
+    RETIRED_ICON_NAMES.includes('deepseek-harness'),
+    'deepseek-harness 必须留在退役名单里 —— 老机器上那份同名位图就靠它清理',
+  )
+})
+
+await test('全新机器：没有本插件安装痕迹时，不碰同名的陌生文件', () => {
+  const dir = makeSandbox('icon-fresh')
+  const paths = resolvePaths({ HOME: dir, DSH_DESKTOP_ROOT: dir })
+
+  // 先放一个「陌生人的」同名图标。全新机器上它不属于本插件，一个字节都不能动。
+  const stranger = iconFileFor(paths.iconThemeDir, 512, RETIRED_ICON_NAMES[0])
+  fs.mkdirSync(path.dirname(stranger), { recursive: true })
+  fs.writeFileSync(stranger, 'not-ours')
+
+  const result = install({ paths, env: { ...process.env, DSH_DESKTOP_ROOT: dir, PATH: fakeToolchain.pathValue }, quiet: true })
+  assert.equal(result.ok, true, 'install 应成功')
+  assert.equal(fs.readFileSync(stranger, 'utf8'), 'not-ours', '没有安装痕迹时，同名文件必须原样保留')
+  assert.equal(
+    result.steps.find((s) => s.id === 'icon-retired')?.status,
+    'skipped',
+    '应明确记下「因为没有安装痕迹而跳过」',
+  )
+  assert.ok(
+    fs.existsSync(iconFileFor(paths.iconThemeDir, Math.max(...ICON_SIZES))),
+    '跳过清理不能影响当前图标名的安装',
+  )
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('从旧版本升级：认得带任一历史包名的生成标记，并清掉退役图标', () => {
+  // 生成标记里带的是**当时的包名**：0.1.0~0.5.x 写 `dsh-linux-desktop`，0.6.x 起写
+  // `dsh-linux-integration`。判据要是绑死当前包名，老用户直接升级上来就会被判成
+  // 「没装过本插件」，迁移静默失效 —— 这正是最需要覆盖的那一类升级。
+  for (const marker of ['dsh-linux-integration', 'dsh-linux-desktop']) {
+    const dir = makeSandbox('icon-upgrade')
+    const paths = resolvePaths({ HOME: dir, DSH_DESKTOP_ROOT: dir })
+    const planted = plantLegacyInstall(paths, marker)
+
+    const result = install({ paths, env: { ...process.env, DSH_DESKTOP_ROOT: dir, PATH: fakeToolchain.pathValue }, quiet: true })
+    assert.equal(result.ok, true, `install 应成功（标记 ${marker}）`)
+    for (const file of planted) {
+      assert.ok(!fs.existsSync(file), `退役图标应被清掉（标记 ${marker}）：${file}`)
+    }
+    assert.ok(
+      fs.existsSync(iconFileFor(paths.iconThemeDir, Math.max(...ICON_SIZES))),
+      `新图标名应已就位（标记 ${marker}）`,
+    )
+    // 所有图标操作都必须落在沙箱里 —— 系统级图标目录一个字节都不能动。
+    for (const step of result.steps) {
+      if (!step.id.startsWith('icon-') || step.id === 'icon-retired') continue
+      assert.ok(step.detail.startsWith(dir), `图标操作越出了沙箱：${step.detail}（标记 ${marker}）`)
+    }
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+await test('install 写出的启动脚本注入的是当前图标名', () => {
+  // 上面那条只测模板本身；这条走真实 install()，锁住「installer 确实把 ICON_NAME 传进去了」。
+  const dir = makeSandbox('icon-launcher')
+  const paths = resolvePaths({ HOME: dir, DSH_DESKTOP_ROOT: dir })
+  const result = install({ paths, env: { ...process.env, DSH_DESKTOP_ROOT: dir, PATH: fakeToolchain.pathValue }, quiet: true })
+  assert.equal(result.ok, true, 'install 应成功')
+
+  const script = fs.readFileSync(paths.launcherFile, 'utf8')
+  assert.match(script, new RegExp(`--icon=${ICON_NAME} `), `启动脚本里的通知图标应是 ${ICON_NAME}`)
+  assert.ok(!script.includes('@@'), '启动脚本不应残留任何占位符')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+await test('卸载时同样清掉退役图标名的残留', () => {
+  const dir = makeSandbox('icon-uninstall')
+  const paths = resolvePaths({ HOME: dir, DSH_DESKTOP_ROOT: dir })
+  const env = { ...process.env, DSH_DESKTOP_ROOT: dir, PATH: fakeToolchain.pathValue }
+  assert.equal(install({ paths, env, quiet: true }).ok, true, 'install 应成功')
+
+  // 装完之后再放一份历史残留：模拟「升级没跑到」的机器（例如关过 autoInstall）。
+  const leftover = iconFileFor(paths.iconThemeDir, 512, RETIRED_ICON_NAMES[0])
+  fs.writeFileSync(leftover, 'legacy')
+
+  const result = uninstall({ paths, env })
+  assert.equal(result.ok, true, 'uninstall 应成功')
+  assert.ok(!fs.existsSync(leftover), '卸载应一并清掉退役图标名的残留')
+  assert.ok(
+    !fs.existsSync(iconFileFor(paths.iconThemeDir, Math.max(...ICON_SIZES))),
+    '当前图标名也应被清理',
+  )
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------
 section('包清单')
 // ---------------------------------------------------------------------------
 
@@ -1860,14 +2036,34 @@ await test('package.json 声明了 dsh.bundle.patch 且文件存在', () => {
 await test('cordis.patch.yml 引用了本包名', () => {
   const patch = fs.readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8')
   assert.match(patch, /name: dsh-linux-integration/)
-  assert.match(patch, /id: linux-desktop/)
+  assert.match(patch, /id: dsh-lxi/)
 })
 
 await test('插件入口导出了 Cordis 契约所需的 name / inject / apply', async () => {
   const mod = await import('../src/index.js')
-  assert.equal(mod.name, 'linux-desktop')
+  assert.equal(mod.name, 'dsh-lxi')
   assert.deepEqual(mod.inject, ['connection', 'webServer'])
   assert.equal(typeof mod.apply, 'function')
+})
+
+// 这三处名字必须永远一致，改一处就得三处一起改：
+//   cordis.patch.yml 的行 id   ← 这一行在 Loader 树里的身份
+//   src/index.js 的 name       ← 同一个身份的另一半
+//   SETTINGS_NAMESPACE         ← 设置卡片的键（客户端 NAMESPACE 也必须跟着）
+// 漏改任何一处，症状都是「设置卡片静默不出现」—— 只有真人打开设置页才看得见，
+// 所以钉在这里。0.6.0 那次整体更名正是漏了这一处（当时叫 linux-desktop）。
+await test('行 id / 插件 name / 设置命名空间 / 客户端 NAMESPACE 四处必须一致', async () => {
+  const patch = fs.readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8')
+  const rowId = /^\s*- id: (\S+)\s*$/m.exec(patch)?.[1]
+  const mod = await import('../src/index.js')
+  const { SETTINGS_NAMESPACE } = await import('../src/settings.js')
+  const clientSource = fs.readFileSync(path.join(ROOT, 'src', 'client.js'), 'utf8')
+  const clientNamespace = /const NAMESPACE = '([^']+)'/.exec(clientSource)?.[1]
+
+  assert.ok(rowId, 'cordis.patch.yml 里应当有且只有一行带 id 的插入项')
+  assert.equal(mod.name, rowId, 'src/index.js 的 name 必须等于补丁里的行 id')
+  assert.equal(SETTINGS_NAMESPACE, rowId, 'SETTINGS_NAMESPACE 必须等于补丁里的行 id')
+  assert.equal(clientNamespace, rowId, 'src/client.js 的 NAMESPACE 必须等于补丁里的行 id')
 })
 
 // ---------------------------------------------------------------------------
@@ -2461,7 +2657,7 @@ await test('客户端行不声明 settingsScope —— 声明了就会在缺该�
 await test('DSH 0.1.7：服务改名成 configForms 后，卡片照常注册', () => {
   const mod = loadClientBundle()
   const ctx = fakeClientCtx({
-    configForms: { get: (ns) => (ns === 'linux-desktop' ? fakeSettingsScope() : undefined) },
+    configForms: { get: (ns) => (ns === 'dsh-lxi' ? fakeSettingsScope() : undefined) },
   })
   mod.apply(ctx)
 
@@ -2469,7 +2665,7 @@ await test('DSH 0.1.7：服务改名成 configForms 后，卡片照常注册', (
   assert.equal(ctx.injected[0].name, 'settings.plugin.item')
 
   const spec = ctx.injected[0].fn()
-  assert.equal(spec.key, 'linux-desktop', 'key 必须等于宿主注册的 settings 命名空间，否则卡片不会被派发')
+  assert.equal(spec.key, 'dsh-lxi', 'key 必须等于宿主注册的 settings 命名空间，否则卡片不会被派发')
   assert.equal(spec.locale, 'dsh-linux-integration', '文案命名空间用的是包名，别和设置命名空间混了')
   assert.ok(spec.inject().hooks.linuxDesktopCard, '卡片应当拿到 store')
 })
@@ -2487,7 +2683,7 @@ await test('老 DSH：settingsScope 还在时仍走老路径（向后兼容）',
   })
   mod.apply(ctx)
 
-  assert.equal(bound, 'linux-desktop', '应当按命名空间绑定')
+  assert.equal(bound, 'dsh-lxi', '应当按命名空间绑定')
   assert.equal(ctx.injected.length, 1)
 })
 

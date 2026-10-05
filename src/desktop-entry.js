@@ -135,18 +135,36 @@ export function renderDesktopEntry({
  * 别名入口的内容。
  *
  * KDE 与 GNOME 在为窗口找图标时，会先找**文件名等于 app_id** 的 `.desktop`。
- * 所以除了主入口的 `StartupWMClass`，还需要一份同内容的 `chrome-127.0.0.1__-Default.desktop`。
+ * 所以除了主入口的 `StartupWMClass`，还需要一份 `chrome-127.0.0.1__-Default.desktop`。
  * 这里直接生成一份完整副本而不是软链接 —— 软链接在部分文件同步工具、Flatpak
  * 门户和 `~/.local/share` 被 rsync 到别的机器时容易断掉。
+ *
+ * 但它比主入口多一行 `NoDisplay=true`：这份文件是**给桌面环境认的，不是给人点的**。
+ * 少了这一行，启动器会把同一项列两遍 —— 两个文件名不同、`Name=` 却一字不差，
+ * 用户看到的就是「程序菜单里有两个一样的 DeepSeek Harness」。`NoDisplay` 只影响
+ * 「要不要列进菜单」，条目本身照旧留在桌面环境的索引里，所以按 app_id 找图标、
+ * 关联任务栏与 Alt-Tab 的逻辑不受影响 —— 这正是它比「干脆不生成别名」正确的地方。
  *
  * @param {string} mainEntryContent 主入口的完整内容。
  * @returns {string}
  */
 export function renderAliasEntry(mainEntryContent) {
-  return mainEntryContent.replace(
-    '# 由 dsh-linux-integration 生成，请勿手工编辑 ——',
-    '# 由 dsh-linux-integration 生成，请勿手工编辑 ——\n# 这是 Wayland app_id 别名入口，内容与 dsh.desktop 完全一致。',
-  )
+  const header = '# 由 dsh-linux-integration 生成，请勿手工编辑 ——'
+  const aliasHeader = [
+    header,
+    '# 这是 Wayland app_id 别名入口，只给桌面环境按 app_id 找图标与关联窗口用。',
+    '# 与 dsh.desktop 的唯一差别是 NoDisplay=true —— 那一份才是给人在启动器里点的。',
+  ].join('\n')
+
+  const withHeader = mainEntryContent.replace(header, aliasHeader)
+
+  const anchor = '\nTerminal=false\n'
+  if (!withHeader.includes(anchor)) {
+    // 主入口的字段顺序改了却没人同步这里，症状会退化成「启动器里同一项列两遍」，
+    // 而且只有真人打开菜单才看得见 —— 与其静默失效，不如当场炸在测试里。
+    throw new Error('renderAliasEntry 找不到 Terminal=false 锚点，无法给别名入口插入 NoDisplay=true')
+  }
+  return withHeader.replace(anchor, `${anchor}NoDisplay=true\n`)
 }
 
 /** 别名 `.desktop` 的文件名。 */

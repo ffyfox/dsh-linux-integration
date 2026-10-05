@@ -14,8 +14,27 @@ import path from 'node:path'
 /** 应用在 XDG 目录里使用的统一目录名。 */
 export const APP_DIRNAME = 'dsh-lxi'
 
-/** 图标主题里注册的图标名（不含扩展名）。 */
-export const ICON_NAME = 'deepseek-harness'
+/**
+ * 图标主题里注册的图标名（不含扩展名）。
+ *
+ * 图标名是**全局命名空间**：主题按名字查找，任何软件都可以占用同一个名字。官方
+ * Electron 桌面端的入口用的就是 `deepseek-harness`，本插件早期也用了同一个名字，
+ * 并把自己那张位图写进**用户级** hicolor —— 而用户级优先级高于 `/usr/share`。于是
+ * 官方端到底显示哪张图，取决于查询工具与请求尺寸（实测：GTK 在 ≤64px 命中系统 SVG、
+ * ≥128px 命中用户级 PNG；Qt 一律命中用户级 PNG），两边图标就串了。
+ *
+ * 所以本插件的图标名必须留在自己的命名空间里：与命令、目录、启动器同名，不再复用
+ * 任何别人的名字。`RETIRED_ICON_NAMES` 里的历史名字只用于清理，不参与新文件生成。
+ */
+export const ICON_NAME = 'dsh-lxi'
+
+/**
+ * 曾经使用、如今已退役的图标名。
+ *
+ * 只用于清理历史遗留（见 `installer.js` 的退役图标清理步骤）——历史版本把这些名字的
+ * 位图写进了用户级 hicolor，不清掉就会继续遮挡别人同名的图标。
+ */
+export const RETIRED_ICON_NAMES = ['deepseek-harness']
 
 /**
  * 安装到 hicolor 主题的位图尺寸档位。
@@ -23,7 +42,7 @@ export const ICON_NAME = 'deepseek-harness'
  * 图标源是位图而不是矢量，所以没有「一个文件任意缩放」这回事 —— 主题按
  * **目录名**索引尺寸，只装一档的话，比它大的槽位只能拉伸放大。多装几档是
  * 图标主题的常规做法。512 那一档直接复制源文件，不需要任何外部转换器，
- * 因此无论系统上有没有 ImageMagick，`Icon=deepseek-harness` 都能解析到。
+ * 因此无论系统上有没有 ImageMagick，`Icon=` 指向的图标名都能解析到。
  */
 export const ICON_SIZES = [128, 256, 512]
 
@@ -41,12 +60,15 @@ export function iconDirFor(iconThemeDir, size) {
 /**
  * 某个尺寸档位下的图标文件路径。
  *
+ * `name` 默认是当前图标名；清理历史遗留图标时需要显式传退役名，因此留出这个参数。
+ *
  * @param {string} iconThemeDir hicolor 主题根目录。
  * @param {number} size 边长（像素）。
+ * @param {string} [name] 图标名，默认 {@link ICON_NAME}。
  * @returns {string}
  */
-export function iconFileFor(iconThemeDir, size) {
-  return path.join(iconDirFor(iconThemeDir, size), `${ICON_NAME}.png`)
+export function iconFileFor(iconThemeDir, size, name = ICON_NAME) {
+  return path.join(iconDirFor(iconThemeDir, size), `${name}.png`)
 }
 
 /** 桌面入口的 basename（不含 .desktop）。 */

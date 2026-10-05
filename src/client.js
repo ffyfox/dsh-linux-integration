@@ -44,8 +44,8 @@ window.__ModuleLoader__.load({
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     const { createSnapshotStore } = require('@deepseek-ai/dsh-client-store')
 
-    /** 必须与 `src/settings.js` 的 `SETTINGS_NAMESPACE` 完全一致。 */
-    const NAMESPACE = 'linux-desktop'
+    /** 必须与 `src/settings.js` 的 `SETTINGS_NAMESPACE`、`cordis.patch.yml` 的行 id 一致。 */
+    const NAMESPACE = 'dsh-lxi'
 
     /** 本包自己的文案命名空间。 */
     const LOCALE_NS = 'dsh-linux-integration'

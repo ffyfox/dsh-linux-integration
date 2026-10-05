@@ -37,8 +37,17 @@ import { pathToFileURL } from 'node:url'
  * settings 命名空间名。
  *
  * 文法由 `dsh-settings` 强制：`/^[a-z][a-z0-9-]*$/`。
+ *
+ * 与 `src/index.js` 的 `name`、`cordis.patch.yml` 的行 `id` 三者必须一致。
+ *
+ * ⚠️ **在 DSH 0.2.x 上这条路径已经失效**（2026-10-06 实测）：
+ * `dsh-settings` 把 `settings.yaml` 那套命名空间模型整体换掉了 ——
+ * `installSection` 这个方法在整个 0.2.0-rc.2 与 0.2.1-alpha.1 里都不存在，
+ * 改成由插件的 `Config` schema **按行 id 自动派生表单**，值存进 profile 补丁文档。
+ * 所以下面 `installSettingsNamespace` 里的调用现在会抛错、被 try/catch 吞掉并 warn，
+ * **设置卡片不再出现**（不影响其余功能）。适配新机制单独排期。
  */
-export const SETTINGS_NAMESPACE = 'linux-desktop'
+export const SETTINGS_NAMESPACE = 'dsh-lxi'
 
 /**
  * 进命名空间的字段。这份清单同时被 schema 与「从 config.json 取 base」使用，

@@ -74,7 +74,7 @@ redact() { printf '%s' "$1" | sed 's/token=[^ &]*/token=<REDACTED>/g'; }
 notify() {
   local title="$1" body="$2" urgency="${3:-normal}"
   if command -v notify-send >/dev/null 2>&1; then
-    notify-send --app-name="DeepSeek Harness" --urgency="$urgency" --icon=deepseek-harness "$title" "$body" 2>/dev/null || true
+    notify-send --app-name="DeepSeek Harness" --urgency="$urgency" --icon=@@ICON_NAME@@ "$title" "$body" 2>/dev/null || true
   fi
 }
 

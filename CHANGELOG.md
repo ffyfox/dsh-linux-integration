@@ -3,6 +3,60 @@
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.6.1] - 2026-10-06
+
+修掉两处用户直接看得见的毛病，并把 0.6.0 那次整体更名漏掉的一处补齐。
+
+**① 图标串号：`deepseek-harness` → `dsh-lxi`。**
+
+图标名是全局命名空间：桌面环境按名字查图标，任何软件都能占用同一个名字。官方 Electron 桌面端的入口用的就是 `deepseek-harness`，而本插件一直也用这个名字，并把自己那张位图写进 `~/.local/share/icons/hicolor/` —— **用户级优先级高于 `/usr/share`**，于是同一个名字下出现了两张完全不同的图。哪一张被取到还取决于查询工具与请求尺寸（实测：GTK 在 ≤64px 命中系统 SVG、≥128px 命中用户级 PNG；Qt 一律命中用户级 PNG），表现就是两个应用的图标互相串、且时好时坏。
+
+本插件改用自己的命名空间 `dsh-lxi`，与命令、目录、启动器保持一致，不再复用别人的名字。
+
+**② 程序启动器里出现两个一模一样的「DeepSeek Harness」。**
+
+本插件必须再生成一份**文件名等于 Wayland `app_id`** 的 `.desktop`（别名入口，`chrome-<host>__-<profile>.desktop`），否则桌面环境找不到这个窗口对应的入口，任务栏会退化成黄色的通用占位图。但这份别名一直是主入口的**完整副本**，而它同时也是启动器会读的合法入口 —— 两个文件名不同、`Name=` 却一字不差，于是菜单里把同一项列了两遍。
+
+别名入口现在多一行 `NoDisplay=true`：它**只影响「要不要列进菜单」，条目本身照旧留在桌面环境的索引里**，因此按 app_id 找图标、关联任务栏与 Alt+Tab 的逻辑不受影响。这也正是它比「干脆不生成别名」正确的地方 —— 后者会把任务栏图标一起弄丢。
+
+**③ 更名补齐：插件行 id `linux-desktop` → `dsh-lxi`。**
+
+0.6.0 那次「包名、命令名、数据目录整体更名」漏掉了这一个内部标识符 —— 插件行的 `id`、插件模块导出的 `name`、日志前缀，以及设置命名空间，四处都还叫 `linux-desktop`。它们必须永远一致（改一处就得四处一起改），漏改的症状是**设置卡片静默不出现**，只有真人打开设置页才看得见。
+
+行 id 还有一层新含义：DSH 0.2 起，插件的设置表单**按行 id 键控**并存进 profile 补丁文档 —— 这个名字会变成永久的设置存储键。本插件在那个旧 id 下**还没有存过任何东西**，所以现在改是成本最低的时候。
+
+### 变更
+
+- 桌面入口与 Wayland app_id 别名入口的 `Icon=` 改为 `dsh-lxi`。
+- 图标改写到 `~/.local/share/icons/hicolor/{128,256,512}x*/apps/dsh-lxi.png`。
+- 启动器通知（`notify-send --icon=`）同步改用同一个名字。
+- **图标本身没有换**，只是换了个名字挂上去。
+- app_id 别名图标（文件名等于 `chrome-<host>__-<profile>`）不受影响 —— 那个名字由 Chromium 决定，不能改。
+- 内部标识符一并更名：`cordis.patch.yml` 的行 `id`、`src/index.js` 的 `name` 与日志前缀、`SETTINGS_NAMESPACE`、客户端 `NAMESPACE`，`linux-desktop` → `dsh-lxi`。
+
+### 修正
+
+- 别名入口（`chrome-<host>__-<profile>.desktop`）带上 `NoDisplay=true`，不再在程序启动器里重复出现。主入口 `dsh.desktop` 不带这一行。
+- `renderAliasEntry` 找不到主入口的 `Terminal=false` 锚点时**当场抛错**，而不是静默生成一份漏了 `NoDisplay` 的副本 —— 后者只有真人打开程序菜单才看得见，属于最难发现的那种退化。
+- **订正 0.6.0 更新日志里的一处说法**：那里写「Hyprland / **KWin** 的规则名与标记块 `dsh-desktop-*` → `dsh-lxi-*`」，但 KWin 的规则标识符（`kwinrulesrc` 里的 `description`）从 0.1.0 起一直是 `DeepSeek Harness Window Rule` —— 它用的是产品名，**从来不是** `dsh-desktop-*`。那次实际只改了 Hyprland。
+
+### 升级
+
+- 默认无需任何操作（`autoInstall` 默认为 `true`）：`dsh web` 下次启动时会自动清掉用户级那份旧的 `deepseek-harness.png`（128 / 256 / 512 三档）与 0.1.x 时代留下的 `deepseek-harness.svg`，同名的图标随即恢复成原本属于它的那一张。
+- 若把 `autoInstall` 关掉了：手动执行一次 `dsh-lxi install`。
+- 清理只在**确认本插件确实安装过**（桌面入口里带本插件的生成标记）时进行；`dsh-lxi uninstall` 同样覆盖新旧两个名字。
+- 升级后若某个图标仍是旧图，注销重登一次 —— 桌面环境会缓存已解析的图标位图。
+- 若你在**另一个 profile 里钉了旧版本**：本插件的自动安装会写图标，而这些文件不随 profile 分家，旧版本仍会按旧的图标名写图 —— 谁最后启动谁说了算，图标会退回互相遮挡的状态。把那个 profile 一起升上来即可。
+- 插件行 id 改名**不需要迁移**：本插件在旧 id 下没有存过任何设置，桌面入口、图标与 KWin / Hyprland 规则也都不以它命名。
+
+### 已知问题
+
+- **DSH 0.2.x 上设置页那张「桌面集成」卡片不再出现。** DSH 0.2 移除了 `settings.yaml` 那套「插件自选命名空间」的模型，改成由插件导出的 `Config` schema **按行 id 自动派生表单**，值存进 profile 补丁文档；`ctx.settings.installSection` 在新版里已不存在。本插件尚未适配，那次调用会失败并被内部的 `try/catch` 吞掉 —— **只影响这张卡片，其余功能一切照常**（`dsh web` 不会因此起不来）。适配单独排期；在此之前请用 `config.json` 或 `dsh-lxi set` 改配置。
+
+### 其它
+
+- 新增用例 11 项（158 → 169）。
+
 ## [0.6.0] - 2026-09-25
 
 **破坏性变更：包名、命令名与数据目录全部更换。**
