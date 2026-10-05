@@ -45,7 +45,19 @@ import {
 } from '../src/gnome.js'
 import { ICON_NAME, ICON_SIZES, RETIRED_ICON_NAMES, iconDirFor, iconFileFor, resolvePaths } from '../src/paths.js'
 import { clearRuntime, inspectRuntime, isProcessAlive, readRuntime, writeRuntime } from '../src/runtime.js'
-import { createSettingsSchema, SETTINGS_FIELDS, SETTINGS_NAMESPACE, settingsBase } from '../src/settings.js'
+import {
+  Config,
+  createSettingsSchema,
+  isVolatile,
+  loadSchemastery,
+  PLACEHOLDER_META,
+  SETTINGS_FIELDS,
+  SETTINGS_NAMESPACE,
+  setPlaceholders,
+  settingsOverlay,
+  settingsPlaceholders,
+  unwrapVolatile,
+} from '../src/settings.js'
 import { findListeningPid, isDshWebProcess, resolveServerTarget, stopServerProcess } from '../src/server.js'
 // 发布脚本里的纯函数。这几个文件都只在被直接执行时才跑 CLI，import 进来没有副作用。
 import { packFromTag, tagForVersion, tagProblem, verifyReleaseState } from '../scripts/pack-from-tag.mjs'
@@ -1231,7 +1243,7 @@ await test('connectHost 把 0.0.0.0 归一化为回环地址', () => {
 })
 
 // ---------------------------------------------------------------------------
-section('设置命名空间（settings.js）')
+section('设置层（settings.js）：Config schema 与合并规则')
 // ---------------------------------------------------------------------------
 
 await test('卡片把窗口宽度与高度渲染在同一行（并列布局）', () => {
@@ -1270,30 +1282,56 @@ await test('命名空间名符合 dsh-settings 的文法', () => {
   assert.match(SETTINGS_NAMESPACE, /^[a-z][a-z0-9-]*$/, 'dsh-settings 只接受小写字母/数字/连字符')
 })
 
-await test('settingsBase 只挑进命名空间的字段', () => {
+await test('settingsOverlay 只挑设置字段，且只挑真正出现过的键', () => {
   const config = defaultConfig()
-  const base = settingsBase(config)
-  assert.deepEqual(Object.keys(base).sort(), [...SETTINGS_FIELDS].sort())
-  assert.equal(base.profileMode, 'dedicated')
-  assert.deepEqual(base.window, { width: 1200, height: 750 })
+  const overlay = settingsOverlay(config)
+  assert.deepEqual(Object.keys(overlay).sort(), [...SETTINGS_FIELDS].sort())
+  assert.equal(overlay.profileMode, 'dedicated')
+  assert.deepEqual(overlay.window, { width: 1200, height: 750 })
 
   // host / port 必须留在 config.json 里：它们要与 dsh web 实际绑定的地址一致，
-  // 放进设置卡片只会制造两份互相矛盾的真相。
-  assert.ok(!('host' in base), 'host 不应进命名空间')
-  assert.ok(!('port' in base), 'port 不应进命名空间')
-  assert.ok(!('configVersion' in base), 'configVersion 不应进命名空间')
+  // 放进设置页只会制造两份互相矛盾的真相。
+  assert.ok(!('host' in overlay), 'host 不应进设置层')
+  assert.ok(!('port' in overlay), 'port 不应进设置层')
+  assert.ok(!('configVersion' in overlay), 'configVersion 不应进设置层')
+  assert.ok(!('desktopName' in overlay), 'desktopName 不应进设置层')
+  assert.ok(!('profile' in overlay), 'profile 不应进设置层')
 
-  // 缺字段时不应塞进 undefined —— 那会让 schema 的 base 层出现脏键。
-  assert.deepEqual(settingsBase({ profileMode: 'shared' }), { profileMode: 'shared' })
+  // 缺键必须**缺席**（不能塞 undefined）：那是「用户没在设置页动过这个字段」的
+  // 表达，合并时 config.json 要继续说了算。塞了 undefined 会把它压成 undefined。
+  assert.deepEqual(settingsOverlay({ profileMode: 'shared' }), { profileMode: 'shared' })
+  assert.deepEqual(settingsOverlay({}), {})
+  assert.deepEqual(settingsOverlay(undefined), {})
+  assert.deepEqual(settingsOverlay(null), {})
+  assert.deepEqual(settingsOverlay('nonsense'), {})
+  assert.deepEqual(settingsOverlay({ profileMode: undefined, browser: 'brave' }), { browser: 'brave' })
 })
 
-await test('schema 用真的 schemastery 构造时默认值与校验都对', async () => {
+await test('volatile 引用在合并前被解包（cordis 解析后的值可能带包装）', () => {
+  const write = Symbol.for('cosmokit.volatile.write')
+  const wrapped = (value) => Object.freeze({ get: () => value, [write]: () => {} })
+
+  assert.equal(isVolatile(wrapped(1)), true)
+  assert.equal(isVolatile({}), false)
+  assert.equal(isVolatile([]), false)
+  assert.equal(isVolatile(null), false)
+  assert.equal(isVolatile('x'), false)
+  assert.equal(unwrapVolatile(wrapped(7)), 7)
+  assert.equal(unwrapVolatile('x'), 'x')
+
+  // 根节点带包装（cordis 传进来的常态）
+  assert.deepEqual(settingsOverlay(wrapped({ browser: 'brave' })), { browser: 'brave' })
+  // 字段级包装（schema 将来若改成逐字段 volatile，这里已经能接住）
+  assert.deepEqual(settingsOverlay({ browser: wrapped('brave') }), { browser: 'brave' })
+  assert.deepEqual(settingsOverlay({ window: wrapped({ width: 1400, height: 900 }) }), {
+    window: { width: 1400, height: 900 },
+  })
+})
+
+await test('schema 用真的 schemastery 构造时：不写默认值、根节点 volatile、类型仍然卡住', async () => {
   // 这个套件按约定「零依赖」运行：CI 只 checkout、不 npm install，宿主机上也
   // 未必把 dsh 装在同一个位置。所以按「本仓库 node_modules → 常见的几个全局
   // 安装位置」依次找，全都找不到才跳过。
-  //
-  // 原先只认 `~/.npm-global/...` 一处 —— 那是作者本机的路径，对任何别人都必然
-  // 落空，这条用例等于形同不存在。
   let z
   for (const candidate of [
     '@deepseek-ai/schemastery',
@@ -1309,33 +1347,170 @@ await test('schema 用真的 schemastery 构造时默认值与校验都对', asy
     }
   }
   if (!z) {
-    return skipTest('schema 用真的 schemastery 构造时默认值与校验都对', '宿主机上没有 @deepseek-ai/schemastery')
+    return skipTest('schema 用真的 schemastery 构造时：不写默认值、根节点 volatile、类型仍然卡住', '宿主机上没有 @deepseek-ai/schemastery')
   }
   const schema = createSettingsSchema(z)
 
-  assert.deepEqual(schema({}), {
-    profileMode: 'dedicated',
-    browser: 'auto',
-    window: { width: 1200, height: 750 },
-    autoInstall: true,
-    manageKwinRules: true,
-    manageHyprlandRules: false,
-    terminalAction: true,
-    terminalCommand: '',
-  })
+  // ① 一律不写默认值：缺键必须缺席。写了默认值，cordis 解析后的配置**总是**带全部
+  // 键，合并时就会用 schema 默认值把用户在 config.json 里改过的值静默压掉。
+  // （解析结果是 volatile 引用，所以要解包后再比。）
+  assert.deepEqual(unwrapVolatile(schema({})), {}, 'schema 不该填任何默认值')
+  assert.deepEqual(
+    unwrapVolatile(schema({ profileMode: 'shared' })),
+    { profileMode: 'shared' },
+    '只给一个键时不该补上别的',
+  )
+  // 嵌套对象尤其要看住：schemastery 给对象 schema 的默认值是 `{}`，不显式
+  // `default(undefined)` 的话，缺 window 时会凭空长出 `window: {}`，
+  // 从而把 config.json 里的宽高压回默认值。
+  assert.ok(!('window' in unwrapVolatile(schema({}))), '缺 window 时不该长出空对象')
 
-  // config.json 作为 base 传进来时，它的值必须压过 schema 默认值。
-  assert.equal(schema({ profileMode: 'shared', window: { width: 1400 } }).profileMode, 'shared')
-  assert.equal(schema({ window: { width: 1400 } }).window.width, 1400)
+  // ② 根节点必须 volatile：dsh-settings 的 volatileForm 靠它认领这个条目（没有
+  // volatile 节点 = 表单永远不出现），而根节点 volatile 让 isVolatilePath 对任意
+  // 路径为真 —— 卡片正是按「一整组 window」的粒度写的。
+  const resolved = schema({ profileMode: 'shared', window: { width: 1400 } })
+  assert.equal(isVolatile(resolved), true, '解析结果应当是 volatile 引用')
+  assert.deepEqual(unwrapVolatile(resolved), { profileMode: 'shared', window: { width: 1400 } })
 
-  // 非法值必须在写入前被拒绝，而不是静默落库。
+  // ③ 类型仍然要卡住：补丁里写 `autoInstall: "yes"` 会让整行加载失败，这是刻意的。
   assert.throws(() => schema({ profileMode: 'bogus' }), /profileMode/)
-  assert.throws(() => schema({ window: { width: 1 } }), /width/)
+  assert.throws(() => schema({ autoInstall: 'yes' }), /autoInstall/)
+
+  // ④ 范围**不**在这里卡：config.js 的 normalizeConfig 才是范围权威。schema 若更严，
+  // 一个 `window.width: 200` 的手改补丁会让整行加载失败，而同样的值写在 config.json
+  // 里只是一条警告 —— 两层判定必须一致。
+  assert.deepEqual(unwrapVolatile(schema({ window: { width: 200 } })), { window: { width: 200 } })
 
   // describe() 会调用 schema.toJSON()，没有它卡片列表会在服务端就炸掉。
   const json = schema.toJSON()
   assert.equal(typeof json, 'object')
   assert.ok(json.refs, 'toJSON() 必须给出 schemastery 的 refs 结构')
+})
+
+await test('导出的 Config 在模块加载时就已构造好（含 dsh 安装目录这条退路）', async () => {
+  // cordis 直接读 `runtime.Config`，所以它必须是模块加载时就存在的导出 ——
+  // 「用到才 import」那条老路走不通。这里把 process.argv[1] 指到本机真实的 dsh
+  // 入口，再用查询串强制重新加载一次模块，走的就是退路分支。
+  const candidates = [
+    path.join(os.homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js'),
+    path.join(os.homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/cli.js'),
+    '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+  ]
+  const entry = candidates.find((candidate) => fs.existsSync(candidate))
+  if (!entry) {
+    return skipTest('导出的 Config 在模块加载时就已构造好（含 dsh 安装目录这条退路）', '宿主机上没有可定位的 dsh 安装')
+  }
+
+  const original = process.argv[1]
+  process.argv[1] = entry
+  try {
+    // schemastery 的默认导出是「带静态方法的函数」（z.object / z.const…），
+    // 不是普通对象。
+    const z = loadSchemastery()
+    assert.equal(typeof z?.object, 'function', '退路应当能从 dsh 安装目录里找到可用的 schemastery')
+    assert.equal(typeof z?.union, 'function')
+
+    const fresh = await import(`../src/settings.js?probe=${String(Date.now())}`)
+    assert.equal(typeof fresh.Config?.toJSON, 'function', 'Config 必须在模块加载时就构造好')
+
+    // 树里必须真的有一个 volatile 节点，否则 dsh-settings 的 describe() 会跳过本插件。
+    // toJSON() 给的是 { uid, refs }，根节点是 refs[uid]。
+    const tree = fresh.Config.toJSON()
+    const hasVolatile = (node) =>
+      node?.meta?.volatile === true || Object.values(node?.dict ?? {}).some((ref) => hasVolatile(tree.refs[ref]))
+    assert.ok(hasVolatile(tree.refs[tree.uid]), 'schema 树里必须有 volatile 节点')
+  } finally {
+    process.argv[1] = original
+  }
+})
+
+await test('settingsPlaceholders 给出「清空后回落到什么」，且键就是客户端草稿名', () => {
+  const placeholders = settingsPlaceholders(defaultConfig())
+  assert.deepEqual(placeholders, {
+    profileMode: 'dedicated',
+    browser: 'auto',
+    windowWidth: '1200',
+    windowHeight: '750',
+    autoInstall: 'true',
+    manageKwinRules: 'true',
+    manageHyprlandRules: 'false',
+    terminalAction: 'true',
+    terminalCommand: '',
+  })
+
+  // 坏输入不该抛：灰字是点缀，缺配置时就留空。
+  assert.deepEqual(Object.keys(settingsPlaceholders(undefined)), Object.keys(placeholders))
+  assert.equal(settingsPlaceholders(undefined).windowWidth, '')
+  assert.equal(settingsPlaceholders({ window: { width: 1400 } }).windowWidth, '1400')
+})
+
+await test('灰字提示的键与客户端 CONTROLS 的草稿名、meta 键都必须逐字一致', () => {
+  // 这是跨进程的字符串契约：宿主写进 schema meta 的键，客户端按草稿名去读。
+  const source = fs.readFileSync(path.join(ROOT, 'src', 'client.js'), 'utf8')
+  const clientMeta = /const PLACEHOLDER_META = '([^']+)'/.exec(source)?.[1]
+  assert.equal(clientMeta, PLACEHOLDER_META, 'meta 键两处必须逐字一致')
+
+  const drafts = [...new Set([...source.matchAll(/\bdraft: '([^']+)'/g)].map((match) => match[1]))]
+  assert.ok(drafts.length >= 8, '应当从 client.js 里解析出草稿名')
+  assert.deepEqual(
+    Object.keys(settingsPlaceholders(defaultConfig())).sort(),
+    [...drafts].sort(),
+    '灰字提示的键必须与客户端的草稿名完全一致',
+  )
+})
+
+await test('setPlaceholders 写进 schema 根 meta —— 纯显示信息，不参与配置解析', () => {
+  const fake = { meta: {} }
+  assert.equal(setPlaceholders(fake, defaultConfig()), true)
+  assert.equal(fake.meta[PLACEHOLDER_META].windowWidth, '1200')
+
+  // schema 不存在（宿主机没有 schemastery）时安静跳过，不抛。
+  assert.equal(setPlaceholders(undefined, defaultConfig()), false)
+  assert.equal(setPlaceholders(null, defaultConfig()), false)
+  assert.equal(setPlaceholders({}, defaultConfig()), false)
+})
+
+await test('灰字提示能活到浏览器：经 schemastery 的 plainSchema 与 toJSON 两趟都不丢', async () => {
+  // 这是「灰字为什么能显示」的机制保证：dsh-settings 会把我们的 schema 过一遍
+  // `new z(schema.toJSON())`（并只删 meta.volatile），再 toJSON 发给浏览器。
+  // 自定义 meta 若在这条路上被丢掉，浏览器就永远读不到灰字。
+  let z
+  for (const candidate of [
+    '@deepseek-ai/schemastery',
+    path.join(os.homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/schemastery/lib/index.mjs'),
+  ]) {
+    try {
+      z = (await import(candidate)).default
+      break
+    } catch {
+      // 换下一个候选位置
+    }
+  }
+  if (!z) {
+    return skipTest('灰字提示能活到浏览器：经 schemastery 的 plainSchema 与 toJSON 两趟都不丢', '宿主机上没有 @deepseek-ai/schemastery')
+  }
+
+  const schema = createSettingsSchema(z)
+  assert.equal(setPlaceholders(schema, defaultConfig()), true)
+
+  // 复刻 dsh-settings 的 plainSchema：重建 + 删掉 volatile
+  const form = new z(schema.toJSON())
+  const walk = (node) => {
+    delete node.meta.volatile
+    for (const child of Object.values(node.dict ?? {})) walk(child)
+    if (node.inner) walk(node.inner)
+    for (const child of node.list ?? []) walk(child)
+  }
+  walk(form)
+
+  const serialized = form.toJSON()
+  const root = serialized.refs[serialized.uid]
+  assert.deepEqual(
+    root.meta[PLACEHOLDER_META],
+    settingsPlaceholders(defaultConfig()),
+    '根 meta 上的灰字提示必须原样出现在最终发给浏览器的 schema 里',
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -2046,24 +2221,35 @@ await test('插件入口导出了 Cordis 契约所需的 name / inject / apply',
   assert.equal(typeof mod.apply, 'function')
 })
 
-// 这三处名字必须永远一致，改一处就得三处一起改：
+// 这几处名字必须永远一致，改一处就得一起改：
 //   cordis.patch.yml 的行 id   ← 这一行在 Loader 树里的身份
 //   src/index.js 的 name       ← 同一个身份的另一半
-//   SETTINGS_NAMESPACE         ← 设置卡片的键（客户端 NAMESPACE 也必须跟着）
-// 漏改任何一处，症状都是「设置卡片静默不出现」—— 只有真人打开设置页才看得见，
-// 所以钉在这里。0.6.0 那次整体更名正是漏了这一处（当时叫 linux-desktop）。
-await test('行 id / 插件 name / 设置命名空间 / 客户端 NAMESPACE 四处必须一致', async () => {
+//   SETTINGS_NAMESPACE         ← DSH 设置表单的键（= 行 id）
+//   src/client.js 的 NAMESPACE ← 客户端向 configForms 要表单时用的键
+//   src/client.js 的 PACKAGE_NAME ← 行配置槽位的键是 `<包名>#<行 id>` 的前半截
+// 漏改任何一处，症状都是「设置界面静默消失」—— 只有真人打开插件页才看得见，
+// 所以钉在这里。0.6.0 那次整体更名正是漏了行 id 这一处（当时叫 linux-desktop）。
+await test('行 id / 插件 name / 设置命名空间 / 客户端两个键 必须处处一致', async () => {
   const patch = fs.readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8')
   const rowId = /^\s*- id: (\S+)\s*$/m.exec(patch)?.[1]
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
   const mod = await import('../src/index.js')
   const { SETTINGS_NAMESPACE } = await import('../src/settings.js')
   const clientSource = fs.readFileSync(path.join(ROOT, 'src', 'client.js'), 'utf8')
   const clientNamespace = /const NAMESPACE = '([^']+)'/.exec(clientSource)?.[1]
+  const clientPackage = /const PACKAGE_NAME = '([^']+)'/.exec(clientSource)?.[1]
 
   assert.ok(rowId, 'cordis.patch.yml 里应当有且只有一行带 id 的插入项')
   assert.equal(mod.name, rowId, 'src/index.js 的 name 必须等于补丁里的行 id')
   assert.equal(SETTINGS_NAMESPACE, rowId, 'SETTINGS_NAMESPACE 必须等于补丁里的行 id')
   assert.equal(clientNamespace, rowId, 'src/client.js 的 NAMESPACE 必须等于补丁里的行 id')
+  assert.equal(clientPackage, manifest.name, 'src/client.js 的 PACKAGE_NAME 必须等于包名')
+  assert.equal(manifest.name, 'dsh-linux-integration', '包名变了的话，客户端的加载器 id 也要跟着改')
+})
+
+await test('插件入口导出 Config —— 没有它 dsh-settings 的 describe() 会跳过本行', async () => {
+  const mod = await import('../src/index.js')
+  assert.ok('Config' in mod, 'src/index.js 必须导出 Config')
 })
 
 // ---------------------------------------------------------------------------
@@ -2592,7 +2778,7 @@ await linuxOnly('卸载时清理运行时状态', async () => {
 })
 
 // ---------------------------------------------------------------------------
-section('客户端插件行：设置卡片服务改名后的兼容性')
+section('客户端插件行：卡片挂到插件管理器的行槽位')
 // ---------------------------------------------------------------------------
 
 /**
@@ -2600,8 +2786,10 @@ section('客户端插件行：设置卡片服务改名后的兼容性')
  *
  * 它是 `window.__ModuleLoader__.load({ id, factory })` 格式，所以给一个假的
  * `window` 和一个假的 `require`，就能在不启动浏览器的情况下拿到 `inject` / `apply`。
+ *
+ * @param {object} [stubs] 覆盖默认桩 —— 渲染用例要给它一份「像 0.2 那样的」原件表。
  */
-function loadClientBundle() {
+function loadClientBundle(stubs = {}) {
   const source = fs.readFileSync(path.join(ROOT, 'src/client.js'), 'utf8')
   let entry = null
   new Function('window', source)({
@@ -2615,6 +2803,7 @@ function loadClientBundle() {
   assert.equal(entry.id, 'dsh-linux-integration', 'id 必须逐字等于包名，否则加载器会拒绝注册')
 
   const requireStub = (name) => {
+    if (name in stubs) return stubs[name]
     if (name === 'react') return {}
     if (name === 'react/jsx-runtime') return { jsx: () => null, jsxs: () => null }
     if (name === '@deepseek-ai/dsh-client-ui-primitives') return {}
@@ -2637,61 +2826,379 @@ function fakeSettingsScope() {
 /** 造一个刚好够客户端插件行用的上下文。 */
 function fakeClientCtx(services = {}) {
   const injected = []
+  const registered = []
   return {
     injected,
+    registered,
     locale: { bind: () => (key) => key, register: () => () => {} },
     effect: (fn) => fn(),
     get: (name) => services[name],
     slots: {
       inject: (name, fn) => injected.push({ name, fn }),
-      register: (spec) => spec,
+      register: (spec, component) => {
+        registered.push({ spec, component })
+        return spec
+      },
     },
   }
 }
 
-await test('客户端行不声明 settingsScope —— 声明了就会在缺该服务的宿主上卡成 pending', () => {
+await test('客户端行不声明 configForms —— 声明了就会在缺该服务的宿主上卡成 pending', () => {
   const mod = loadClientBundle()
   assert.deepEqual(mod.inject, ['slots', 'locale'], 'inject 里只应留下一定存在的服务')
 })
 
-await test('DSH 0.1.7：服务改名成 configForms 后，卡片照常注册', () => {
+await test('卡片挂到 plugins.row.config，键是 <包名>#<行 id>', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
+  const rowId = /^\s*- id: (\S+)\s*$/m.exec(fs.readFileSync(path.join(ROOT, 'cordis.patch.yml'), 'utf8'))?.[1]
+
   const mod = loadClientBundle()
   const ctx = fakeClientCtx({
     configForms: { get: (ns) => (ns === 'dsh-lxi' ? fakeSettingsScope() : undefined) },
   })
   mod.apply(ctx)
 
-  assert.equal(ctx.injected.length, 1, '应当注册一张设置卡片')
-  assert.equal(ctx.injected[0].name, 'settings.plugin.item')
+  assert.equal(ctx.injected.length, 1, '应当注册一张配置卡片')
+  assert.equal(ctx.injected[0].name, 'plugins.row.config', '老槽位 settings.plugin.item 在 DSH 0.2 已不存在')
 
   const spec = ctx.injected[0].fn()
-  assert.equal(spec.key, 'dsh-lxi', 'key 必须等于宿主注册的 settings 命名空间，否则卡片不会被派发')
+  assert.equal(spec.name, 'plugins.row.config')
+  assert.equal(
+    spec.key,
+    `${manifest.name}#${rowId}`,
+    '键必须等于插件管理器的 rowConfigKey(pkg.name, row.rowId)，否则行上不会出现「配置」控件',
+  )
   assert.equal(spec.locale, 'dsh-linux-integration', '文案命名空间用的是包名，别和设置命名空间混了')
   assert.ok(spec.inject().hooks.linuxDesktopCard, '卡片应当拿到 store')
 })
 
-await test('老 DSH：settingsScope 还在时仍走老路径（向后兼容）', () => {
+await test('summary 视图返回 null —— 那一份会被塞进 <p> 里', () => {
   const mod = loadClientBundle()
-  let bound = null
-  const ctx = fakeClientCtx({
-    settingsScope: {
-      bind: ({ namespace }) => {
-        bound = namespace
-        return fakeSettingsScope()
-      },
-    },
-  })
+  const ctx = fakeClientCtx({ configForms: { get: () => fakeSettingsScope() } })
   mod.apply(ctx)
 
-  assert.equal(bound, 'dsh-lxi', '应当按命名空间绑定')
-  assert.equal(ctx.injected.length, 1)
+  // 假 ctx 不会自动触发注册（真 cordis 会在槽位声明时调用），所以手动跑一次。
+  ctx.injected[0].fn()
+
+  const { component } = ctx.registered[0]
+  assert.equal(typeof component, 'function')
+  assert.equal(component({ view: 'summary' }), null)
 })
 
-await test('两个服务都没有时不抛异常、也不注册卡片（客户端行抛异常会连累整个 web 界面）', () => {
+await test('宿主没服务这个命名空间时不注册卡片，也不抛异常', () => {
   const mod = loadClientBundle()
-  const ctx = fakeClientCtx()
-  assert.doesNotThrow(() => mod.apply(ctx), '缺少设置页服务时必须安静跳过')
-  assert.equal(ctx.injected.length, 0)
+
+  // 服务在、但这个命名空间没被服务（Config 没导出 / 行没激活）
+  const withoutNamespace = fakeClientCtx({ configForms: { get: () => undefined } })
+  assert.doesNotThrow(() => mod.apply(withoutNamespace), '命名空间不可用时必须安静跳过')
+  assert.equal(withoutNamespace.injected.length, 0)
+
+  // 客户端行抛异常会连累整个 web 界面，所以连服务都没有时也不能抛
+  const bare = fakeClientCtx()
+  assert.doesNotThrow(() => mod.apply(bare))
+  assert.equal(bare.injected.length, 0)
+})
+
+await test('卡片引用的每个原件都必须在宿主的 dsh-client-ui-primitives 里存在', () => {
+  // 由来：0.7.0 第一次装上时，行详情页里卡片**整块是空白**。根因只有一个 ——
+  // 卡片写的是 `primitives.IconChevronDownOutline14`（0.1.x 按尺寸命名），而 0.2
+  // 改成按字重命名（`…OutlineRegular` / `…Medium`）。`jsx(undefined, …)` 让整张
+  // 卡片渲染抛错，React 把那一块渲染成空白：页面其余部分照常，界面上没有任何提示。
+  //
+  // 所以把「卡片引用的原件名」与「真实装着的 primitives 导出表」对一遍。这份包在
+  // 宿主机上通常随 dsh 一起装着；找不到就跳过（本套件零依赖，CI 上没有 dsh）。
+  const candidates = [
+    path.join(os.homedir(), '.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-primitives/lib/index.js'),
+    '/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-primitives/lib/index.js',
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-primitives/lib/index.js',
+  ]
+  const lib = candidates.find((candidate) => fs.existsSync(candidate))
+  if (!lib) {
+    return skipTest(
+      '卡片引用的每个原件都必须在宿主的 dsh-client-ui-primitives 里存在',
+      '宿主机上找不到 dsh-client-ui-primitives',
+    )
+  }
+
+  const exported = new Set(
+    (/export \{([^}]*)\}/.exec(fs.readFileSync(lib, 'utf8'))?.[1] ?? '')
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean),
+  )
+  assert.ok(exported.size > 50, `没能从 ${lib} 里解析出导出表`)
+
+  const source = fs.readFileSync(path.join(ROOT, 'src', 'client.js'), 'utf8')
+
+  // ① 直接引用的原件（`primitives.X`）必须一个不少
+  const used = [...new Set([...source.matchAll(/primitives\.([A-Za-z0-9_$]+)/g)].map((match) => match[1]))]
+  assert.ok(used.length > 0, '卡片应当用到 primitives')
+  for (const name of used) {
+    assert.ok(exported.has(name), `primitives.${name} 不存在 —— 渲染时会抛错，那一块会变成空白`)
+  }
+
+  // ② 跨版本候选链至少要有一个名字命中（链本身就是为「名字变过」而设的）
+  const chains = [...source.matchAll(/pickPrimitive\(\[([^\]]*)\]\)/g)].map((match) =>
+    [...match[1].matchAll(/'([^']+)'/g)].map((quoted) => quoted[1]),
+  )
+  assert.ok(chains.length > 0, '应当至少有一处跨版本候选链')
+  for (const chain of chains) {
+    assert.ok(
+      chain.some((name) => exported.has(name)),
+      `候选链 [${chain.join(', ')}] 在这份 primitives 里一个都不存在`,
+    )
+  }
+})
+
+await test('卡片能带着一份完整快照真的渲染一遍（取不到原件时 React 只会显示空白）', () => {
+  // 这一条盯「渲染时不抛错」。把 react / jsx-runtime / 原件都换成会记账的桩，然后
+  // 强制展开、把九个控件全渲染一遍 —— `jsx(undefined, …)` 这类问题就在这里被抓住。
+  const nodes = []
+  const element = (type, props = {}) => {
+    if (type === undefined || type === null) {
+      throw new Error('元素类型无效：原件取不到（React 的表现为把整块渲染成空白）')
+    }
+    nodes.push({ type, props })
+    // 函数组件真的调用下去 —— 与 React 一样递归，这样控件内部的错误也会被抓到。
+    if (typeof type === 'function') return type(props)
+    return { type, props }
+  }
+  const renderedTypes = () => nodes.map((node) => node.type)
+
+  // 原件桩按 0.2 的真实名字给（这一版就是这么命名的），并且把 props 原样传下去 ——
+  // 断言要看的就是控件拿到的那几个属性。
+  const primitivesStub = {
+    Tag: (props) => element('Tag', props),
+    Switch: (props) => element('Switch', props),
+    Pill: (props) => element('Pill', props),
+    IconChevronDownOutlineRegular: (props) => element('IconChevronDownOutlineRegular', props),
+  }
+
+  const mod = loadClientBundle({
+    react: {
+      useState: () => [true, () => {}], // 强制展开，把九个控件都渲染一遍
+      useRef: () => ({ current: false }),
+      useEffect: () => {},
+    },
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    '@deepseek-ai/dsh-client-ui-primitives': primitivesStub,
+  })
+
+  const ctx = fakeClientCtx({ configForms: { get: () => fakeSettingsScope() } })
+  mod.apply(ctx)
+  ctx.injected[0].fn()
+  const { component } = ctx.registered[0]
+
+  const field = { text: '', overridden: false, invalid: false, clear: false }
+  const state = {
+    available: true,
+    writable: true,
+    dirty: false,
+    invalid: false,
+    saving: false,
+    failed: false,
+    fields: new Proxy({}, { get: () => field }),
+  }
+  // 宿主随 schema 发过来的「清空后回落到什么」
+  const PLACEHOLDERS = {
+    profileMode: 'dedicated',
+    browser: 'auto',
+    windowWidth: '1200',
+    windowHeight: '750',
+    autoInstall: 'true',
+    manageKwinRules: 'true',
+    manageHyprlandRules: 'false',
+    terminalAction: 'true',
+    terminalCommand: '',
+  }
+
+  const propsOf = (predicate) => nodes.find(predicate)?.props
+  const inputProps = (id) => propsOf((node) => node.type === 'input' && node.props.id === id)
+
+  assert.doesNotThrow(() =>
+    component({
+      view: 'page',
+      t: (key) => key,
+      useLinuxDesktopCard: (select) => select(state),
+      placeholders: () => PLACEHOLDERS,
+    }),
+  )
+  assert.ok(renderedTypes().includes('input'), '展开后应当渲染出输入框')
+  assert.ok(renderedTypes().includes('button'), '展开后应当渲染出按钮')
+  assert.ok(renderedTypes().includes('Pill'), '配置模式的选择控件应当渲染出来')
+  assert.ok(renderedTypes().includes('Switch'), '布尔开关应当渲染出来')
+  assert.ok(renderedTypes().includes('IconChevronDownOutlineRegular'), '应当渲染出折叠箭头')
+
+  // 灰字：没覆盖的字段，输入框是空的、占位符给出「清空后回落到什么」。
+  assert.equal(inputProps('dsld-windowWidth')?.value, '')
+  assert.equal(inputProps('dsld-windowWidth')?.placeholder, '1200')
+  assert.equal(inputProps('dsld-windowHeight')?.placeholder, '750')
+  assert.equal(inputProps('dsld-browser')?.placeholder, 'auto')
+  assert.equal(inputProps('dsld-terminalCommand')?.placeholder, '')
+
+  // 开关与二选一没有灰字可用，改为**显示当前生效值**（否则「它现在是开着的」在界面上
+  // 根本看不出来，用户还会点反）。
+  assert.equal(propsOf((node) => node.type === 'Switch' && node.props.label === 'autoInstallLabel')?.checked, true)
+  assert.equal(
+    propsOf((node) => node.type === 'Pill' && node.props.children === 'profileModeDedicated')?.active,
+    true,
+  )
+  assert.equal(
+    propsOf((node) => node.type === 'Pill' && node.props.children === 'profileModeShared')?.active,
+    false,
+  )
+
+  // 已覆盖的字段显示的是**存下来的覆盖值**，不再用灰字。
+  const overridden = {
+    ...state,
+    fields: new Proxy({}, { get: () => ({ text: '1400', overridden: true, invalid: false, clear: false }) }),
+  }
+  nodes.length = 0
+  component({
+    view: 'page',
+    t: (key) => key,
+    useLinuxDesktopCard: (select) => select(overridden),
+    placeholders: () => PLACEHOLDERS,
+  })
+  assert.equal(inputProps('dsld-windowWidth')?.value, '1400')
+  assert.equal(inputProps('dsld-windowWidth')?.placeholder, '1200', '灰字仍然在，只是不再当值用')
+
+  // 非法值：类名必须是**基类 + 修饰**，不能只剩修饰。`.dsld_input` 是高度、圆角、内边距、
+  // 字号的唯一来源，掉了就塌成浏览器的裸 input（实测 34px → 21px，方角，内边距 12px → 2px，
+  // 字号 13px → 13.33px，还会把我们用 `outline:none` 关掉的主题焦点环 2px 蓝框露出来）。
+  // 0.7.0 装到日常那套上，第一次输入就撞上这个。
+  const bad = {
+    ...state,
+    fields: new Proxy(
+      {},
+      {
+        get: (_, key) =>
+          key === 'windowWidth'
+            ? { text: '1', overridden: false, invalid: true, clear: false }
+            : { text: '', overridden: false, invalid: false, clear: false },
+      },
+    ),
+  }
+  nodes.length = 0
+  component({
+    view: 'page',
+    t: (key) => key,
+    useLinuxDesktopCard: (select) => select(bad),
+    placeholders: () => PLACEHOLDERS,
+  })
+  assert.equal(
+    inputProps('dsld-windowWidth')?.className,
+    'dsld_input dsld_inputInvalid',
+    '非法时也必须保留基类，否则输入框会塌成浏览器默认样子',
+  )
+  assert.equal(
+    propsOf((node) => node.type === 'p' && node.props.className === 'dsld_invalid')?.children,
+    'invalidNumber',
+    '非法时要给出非法提示',
+  )
+  assert.equal(
+    inputProps('dsld-browser')?.className,
+    'dsld_input',
+    '合法字段不该被牵连进非法态',
+  )
+  assert.ok(renderedTypes().includes('Switch'), '非法态下其余控件照常渲染')
+
+  // 结构上钉死这条：输入框的类名只能来自 inputClass()，源码里不许再出现「二选一」写法。
+  const clientSource = fs.readFileSync(path.join(ROOT, 'src', 'client.js'), 'utf8')
+  assert.equal(
+    /className:\s*state\.invalid \?/.test(clientSource),
+    false,
+    '输入框类名不能再写成二选一 —— 那会把基类整条丢掉',
+  )
+})
+
+await test('非法只在输入框失焦之后才显示（第一个按键必然是 1，不该当场变红）', () => {
+  // 从 0.7.0 起框里是空的，任何尺寸都得从 `1` 敲起：`1`、`14`、`140` 一路都不合法，
+  // 边敲边红既吓人又没意义。判红推迟到失焦；**拦保存用的是另一套判据**，所以非法值
+  // 照样存不下去（那条由 shell().invalid 管，不在这里）。
+  const createSnapshotStore = (initial) => {
+    let value = initial
+    const subscribers = new Set()
+    return {
+      set(next) {
+        value = next
+        for (const fn of subscribers) fn()
+      },
+      get: () => value,
+      subscribe(fn) {
+        subscribers.add(fn)
+        return () => subscribers.delete(fn)
+      },
+    }
+  }
+
+  const mod = loadClientBundle({
+    react: { useState: () => [true, () => {}], useRef: () => ({ current: false }), useEffect: () => {} },
+    'react/jsx-runtime': { jsx: () => null, jsxs: () => null },
+    '@deepseek-ai/dsh-client-ui-primitives': {},
+    '@deepseek-ai/dsh-client-store': { createSnapshotStore },
+  })
+  const ctx = fakeClientCtx({ configForms: { get: () => fakeSettingsScope() } })
+  mod.apply(ctx)
+
+  const injected = ctx.injected[0].fn().inject()
+  const store = injected.hooks.linuxDesktopCard
+  const width = () => store.get().fields.windowWidth
+
+  assert.equal(typeof injected.blur, 'function', '卡片要拿到失焦动作')
+
+  injected.edit('windowWidth', '1')
+  assert.equal(width().text, '1')
+  assert.equal(width().invalid, false, '还没失焦，先别判红')
+
+  injected.blur('windowWidth')
+  assert.equal(width().invalid, true, '失焦之后就该判红')
+
+  injected.edit('windowWidth', '1400')
+  assert.equal(width().invalid, false, '值合法了立刻不红')
+  assert.equal(width().overridden, true)
+
+  // 放弃修改 = 回到「没碰过」的起点，不该还记着上一次的红。
+  injected.edit('windowWidth', '1')
+  injected.blur('windowWidth')
+  injected.discard()
+  injected.edit('windowWidth', '1')
+  assert.equal(width().invalid, false, '放弃修改后重新开始，不该沿用「碰过」的记忆')
+})
+
+await test('卡片 CSS 引用的 --dsw-* 变量都必须在宿主主题里真的定义过', () => {
+  // 由来：0.7.0 装上后「非法」提示是**黑色**的。根因是卡片引用了 `--dsw-alias-label-error`，
+  // 而 0.2 主题里没有这个名字（真名是 `--dsw-alias-state-error-primary`）。`var()` 落空会让
+  // 整条声明变成无效值：`color` 继承正文色、`border-color` 退回 currentColor —— 界面上既不
+  // 报错、也不明显，只有肉眼能看出来。所以拿真主题的变量表逐个对。
+  const candidates = [
+    path.join(
+      os.homedir(),
+      '.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js',
+    ),
+    '/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js',
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js',
+  ]
+  const lib = candidates.find((candidate) => fs.existsSync(candidate))
+  if (!lib) {
+    return skipTest(
+      '卡片 CSS 引用的 --dsw-* 变量都必须在宿主主题里真的定义过',
+      '宿主机上找不到 dsh-client-ui-theme',
+    )
+  }
+
+  const defined = new Set(
+    [...fs.readFileSync(lib, 'utf8').matchAll(/(--dsw-[a-z0-9-]+)\s*:/g)].map((match) => match[1]),
+  )
+  assert.ok(defined.size > 100, `没能从 ${lib} 里解析出主题变量表`)
+
+  const source = fs.readFileSync(path.join(ROOT, 'src', 'client.js'), 'utf8')
+  const css = /const CSS_SOURCE = \[(.*?)\]\.join\(''\)/s.exec(source)?.[1] ?? ''
+  assert.ok(css.length > 1000, '没能截出卡片的 CSS')
+  const used = [...new Set([...css.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((match) => match[1]))]
+  assert.ok(used.length >= 8, '卡片应当用到主题变量')
+  const missing = used.filter((name) => !defined.has(name))
+  assert.deepEqual(missing, [], `这些主题变量在宿主里不存在，引用它们等于没写：${missing.join(', ')}`)
 })
 
 // ---------------------------------------------------------------------------

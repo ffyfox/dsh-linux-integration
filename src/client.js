@@ -18,12 +18,21 @@
  *   - **不需要构建步骤**，与本项目「纯 ESM、零构建」的取向一致；
  *   - `id` 必须**逐字等于** package.json 的 `name`，否则加载器会拒绝注册。
  *
- * ## 卡片为什么必须和宿主命名空间同名
+ * ## 卡片挂在哪（DSH 0.2 起）
  *
- * 「插件配置」标签页渲染的是两份账本的交集：宿主 `settings.describe()` 报出来的
- * 命名空间，以及注册进 `settings.plugin.item` 这个 keyed slot 的卡片。slot 的
- * `key` 必须等于 `src/settings.js` 里的 `SETTINGS_NAMESPACE`；对不上就永远不会被
- * 派发，而且**不会报错** —— 只会静默消失。
+ * 0.2 把「配置插件」这件事搬去了侧栏的**插件**页：老设置页那个
+ * `settings.plugin.item` keyed slot **已经不存在**（全包搜索只剩注释里的引用），
+ * 改成 `dsh-client-ui-plugin-manager` 声明的三个槽位 —— `plugins.item`（官方插件）、
+ * `plugins.bundle.config`（组合包，键 = 包名）、`plugins.row.config`（某一行，
+ * 键 = `<包名>#<行 id>`）。本卡片挂**行**槽位：界面属于行，而 `Config` schema
+ * 正是行的属性。
+ *
+ * 键必须逐字等于插件管理器的 `rowConfigKey(pkg.name, row.rowId)`；对不上就永远
+ * 不会被派发，而且**不会报错** —— 只会静默消失。行上那个「配置」控件的显示条件
+ * 就是这个键存在。
+ *
+ * 槽位会按 `view` 被渲染两次：`page`（行详情页正文）与 `summary`（行描述缺失时
+ * 的兜底短句）。`summary` 会被塞进 `<p>` 里，所以那时必须返回 `null`。
  *
  * ## 依赖
  *
@@ -44,11 +53,62 @@ window.__ModuleLoader__.load({
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     const { createSnapshotStore } = require('@deepseek-ai/dsh-client-store')
 
-    /** 必须与 `src/settings.js` 的 `SETTINGS_NAMESPACE`、`cordis.patch.yml` 的行 id 一致。 */
+    /**
+     * 按候选名取一个原件：名字在两代之间变过时用它兜底。
+     *
+     * 取不到任何一个时返回 `undefined`，而 `jsx(undefined, …)` 会让**整张卡片**在
+     * 渲染时抛错 —— React 的表现是把那一块渲染成**空白**，页面其余部分照常、界面
+     * 上没有任何提示。所以候选链本身要被用例盯着（见 test/smoke.mjs）。
+     *
+     * @param {string[]} names 候选的原件名，由新到旧。
+     * @returns {Function | undefined} 第一个存在的原件。
+     */
+    function pickPrimitive(names) {
+      for (const name of names) {
+        if (primitives[name]) return primitives[name]
+      }
+      return undefined
+    }
+
+    /**
+     * 折叠箭头用的图标。
+     *
+     * 图标原件的命名在两代之间变过：0.1.x 按**尺寸**命名
+     * （`IconChevronDownOutline14`），0.2 改成按**字重**命名
+     * （`IconChevronDownOutlineRegular` / `…Medium`，尺寸走 `size` 属性、默认就是 14）。
+     * 实测踩过：写死旧名时行详情页里的卡片整块变成空白。
+     */
+    const ChevronDownIcon = pickPrimitive([
+      'IconChevronDownOutlineRegular',
+      'IconChevronDownOutlineMedium',
+      'IconChevronDownOutline14',
+    ])
+
+    /** 必须逐字等于 package.json 的 name —— 也等于上面 `load({ id })` 的那一个。 */
+    const PACKAGE_NAME = 'dsh-linux-integration'
+
+    /** 设置命名空间：等于 `src/settings.js` 的 `SETTINGS_NAMESPACE`、补丁里的行 id。 */
     const NAMESPACE = 'dsh-lxi'
 
+    /**
+     * 行配置槽位的键：`<组合包名>#<行 id>`。
+     *
+     * 插件管理器用 `rowConfigKey(pkg.name, row.rowId)` 生成它；行上「配置」控件的
+     * 显示条件就是它存在。
+     */
+    const ROW_KEY = `${PACKAGE_NAME}#${NAMESPACE}`
+
+    /**
+     * 「灰字提示」在 schema 根 meta 上的键。
+     *
+     * 必须与 `src/settings.js` 的 `PLACEHOLDER_META` 逐字一致（有用例钉住）。宿主把
+     * 「清空这个字段后会回落到什么」（= `config.json` 的当前值）挂在这里，随
+     * `settings.describe()` 一起发到浏览器 —— 纯显示信息，不参与配置解析。
+     */
+    const PLACEHOLDER_META = 'x-dsh-lxi-placeholders'
+
     /** 本包自己的文案命名空间。 */
-    const LOCALE_NS = 'dsh-linux-integration'
+    const LOCALE_NS = PACKAGE_NAME
 
     // -----------------------------------------------------------------------
     // 样式
@@ -57,7 +117,7 @@ window.__ModuleLoader__.load({
     // 与 DSH 自带的插件卡片同构：同一边框、圆角、hover 与展开态，只是类名前缀
     // 换成自己的，避免和别的插件抢样式。颜色全部走主题变量，明暗主题都跟随。
     const CSS_SOURCE = [
-      '.dsld_card{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:16px;list-style:none;transition:border-color .16s,background .16s}',
+      '.dsld_card{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:16px;transition:border-color .16s,background .16s}',
       '.dsld_card:hover{border-color:var(--dsw-alias-label-dimmed)}',
       '.dsld_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}',
       '.dsld_header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}',
@@ -71,7 +131,7 @@ window.__ModuleLoader__.load({
       '.dsld_readOnly{color:var(--dsw-alias-label-tertiary);margin:12px 0 0;font-size:12px;line-height:1.5}',
       '.dsld_pending{flex:none}',
       '.dsld_footer{border-top:.5px solid var(--dsw-alias-border-l2);justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px;display:flex}',
-      '.dsld_failed{min-width:0;color:var(--dsw-alias-label-error);flex:1;margin:0;font-size:12px;line-height:1.5}',
+      '.dsld_failed{min-width:0;color:var(--dsw-alias-state-error-primary);flex:1;margin:0;font-size:12px;line-height:1.5}',
       '.dsld_discard,.dsld_save{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
       '.dsld_discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}',
       '.dsld_discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}',
@@ -88,9 +148,14 @@ window.__ModuleLoader__.load({
       '.dsld_reset:disabled{cursor:default}',
       '.dsld_input{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
       '.dsld_input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
+      // 灰字提示统一走三级文字色，明暗主题都跟随（浏览器默认的 placeholder 色偏淡且不跟主题）。
+      '.dsld_input::placeholder{color:var(--dsw-alias-label-tertiary);opacity:1}',
       '.dsld_input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
-      '.dsld_inputInvalid{border-color:var(--dsw-alias-label-error)}',
-      '.dsld_invalid{color:var(--dsw-alias-label-error);margin:0;font-size:12px;line-height:1.5}',
+      // 报错色只有一个来源：0.2 主题里的是 `--dsw-alias-state-error-primary`。曾经写成
+      // `--dsw-alias-label-error` —— 那个名字在主题里根本不存在，`var()` 落空后整条声明
+      // 变成无效值，于是红线不红、提示文字继承正文色（黑）。引用主题变量必须对着真表核。
+      '.dsld_inputInvalid{border-color:var(--dsw-alias-state-error-primary)}',
+      '.dsld_invalid{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}',
       '.dsld_hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}',
       '.dsld_choices{align-items:center;gap:8px;display:flex}',
       '.dsld_sizeRow{gap:8px;display:flex}',
@@ -136,6 +201,18 @@ window.__ModuleLoader__.load({
       sizeRow: 'dsld_sizeRow',
       sizeCell: 'dsld_sizeCell',
     }
+
+    /**
+     * 输入框的类名。
+     *
+     * `dsld_inputInvalid` 是**加**在基类上的修饰，绝不能替代它 —— 高度、内边距、圆角、
+     * 字号全在 `.dsld_input` 上。一旦掉成裸 input，输入框会塌成一行高、变方角、字号回到
+     * 浏览器默认，还会把我们故意关掉的主题焦点环（2px 蓝框）露出来。
+     *
+     * 2026-10-06 的线上 bug 正是这里：改成「空框 + 灰字」以后，第一个按键必然是 `1`
+     * （< 320，非法），于是每敲一下输入框就塌一次、变回正常再塌一次。
+     */
+    const inputClass = (invalid) => (invalid ? `${CSS.input} ${CSS.inputInvalid}` : CSS.input)
 
     // -----------------------------------------------------------------------
     // 文案
@@ -335,6 +412,8 @@ window.__ModuleLoader__.load({
       constructor(scope) {
         this.scope = scope
         this.staged = new Map()
+        // 「已经被用户碰过并离开」的草稿。判红看它 —— 详见 fieldState。
+        this.touched = new Set()
         this.listeners = new Set()
         this.saving = false
         this.failed = false
@@ -355,7 +434,16 @@ window.__ModuleLoader__.load({
         return toText(readValue(this.scope.getSnapshot().value, draft))
       }
 
-      /** 某个草稿的控件状态。 */
+      /**
+       * 某个草稿的控件状态。
+       *
+       * 这里的 `invalid` 是**显示用**的：只有用户已经碰过这个框、并且离开了它（失焦）之后
+       * 才算真。理由是从 0.7.0 起框里是空的，任何尺寸都得从 `1` 敲起 —— `1`、`14`、`140`
+       * 一路都不合法，边敲边红既吓人又没意义；失焦才是「这个值我认了」的时刻。
+       *
+       * 拦保存用的是另一套判据（`shell().invalid`，基于真正要写什么），所以「先不判红」
+       * 不等于「放行非法值」：保存按钮该灰还是灰。
+       */
       fieldState(draft) {
         const staged = this.staged.get(draft)
         const ns = GROUP_OF[draft].ns
@@ -372,9 +460,16 @@ window.__ModuleLoader__.load({
         return {
           text: staged.text,
           overridden: parsed !== undefined && parsed.kind === 'set',
-          invalid: parsed === undefined,
+          invalid: parsed === undefined && this.touched.has(draft),
           clear: false,
         }
+      }
+
+      /** 输入框失焦：这个草稿从此刻起可以显示非法了。 */
+      markTouched(draft) {
+        if (this.touched.has(draft)) return
+        this.touched.add(draft)
+        this.publish()
       }
 
       /** 卡片级状态。 */
@@ -394,6 +489,8 @@ window.__ModuleLoader__.load({
       actions() {
         return {
           edit: (draft, text) => this.stage(draft, { text, clear: false }),
+          // 失焦才算「这个值我认了」，此后才显示非法（见 fieldState）。
+          blur: (draft) => this.markTouched(draft),
           resetField: (draft) => this.stage(draft, { text: '', clear: true }),
           save: () => {
             void this.save()
@@ -401,6 +498,7 @@ window.__ModuleLoader__.load({
           discard: () => {
             if (this.staged.size === 0 && !this.failed) return
             this.staged.clear()
+            this.touched.clear()
             this.failed = false
             this.publish()
           },
@@ -472,7 +570,10 @@ window.__ModuleLoader__.load({
         this.publish()
         let landed = true
         for (const write of writes) landed = (await write()) && landed
-        if (landed) this.staged.clear()
+        if (landed) {
+          this.staged.clear()
+          this.touched.clear()
+        }
         this.saving = false
         this.failed = !landed
         this.publish()
@@ -561,13 +662,16 @@ window.__ModuleLoader__.load({
         children: [
           jsx('input', {
             id: props.id,
-            className: state.invalid ? CSS.inputInvalid : CSS.input,
+            className: inputClass(state.invalid),
             type: 'text',
             ...(numeric ? { inputMode: 'numeric' } : {}),
             ...(state.invalid ? { 'aria-invalid': true } : {}),
             value: state.text,
+            // 未覆盖时输入框是空的，灰字提示「清空后回落到什么」（= config.json 的当前值）。
+            placeholder: props.placeholder ?? '',
             disabled,
             onChange: (event) => props.onEdit(control.draft, event.target.value),
+            onBlur: () => props.onBlur(control.draft),
           }),
         ],
       })
@@ -581,10 +685,10 @@ window.__ModuleLoader__.load({
      * 各自保留标签、覆盖徽标与重置按钮；提示与校验信息放在整行下方共用。
      */
     function SizePairControl(props) {
-      const { t, controls, states, disabled } = props
+      const { t, controls, states, placeholders, disabled } = props
       const invalid = states.some((state) => state.invalid)
 
-      const cell = (control, state) =>
+      const cell = (control, state, index) =>
         jsxs(
           'div',
           {
@@ -617,13 +721,15 @@ window.__ModuleLoader__.load({
               }),
               jsx('input', {
                 id: `dsld-${control.draft}`,
-                className: state.invalid ? CSS.inputInvalid : CSS.input,
+                className: inputClass(state.invalid),
                 type: 'text',
                 inputMode: 'numeric',
                 ...(state.invalid ? { 'aria-invalid': true } : {}),
                 value: state.text,
+                placeholder: placeholders?.[index] ?? '',
                 disabled,
                 onChange: (event) => props.onEdit(control.draft, event.target.value),
+                onBlur: () => props.onBlur(control.draft),
               }),
             ],
           },
@@ -635,7 +741,7 @@ window.__ModuleLoader__.load({
         children: [
           jsx('div', {
             className: CSS.sizeRow,
-            children: controls.map((control, index) => cell(control, states[index])),
+            children: controls.map((control, index) => cell(control, states[index], index)),
           }),
           jsx('p', {
             className: invalid ? CSS.invalid : CSS.hint,
@@ -646,7 +752,8 @@ window.__ModuleLoader__.load({
     }
 
     /** 布尔开关。 */
-    function SwitchControl(props) {      const { t, control, state, disabled } = props
+    function SwitchControl(props) {
+      const { t, control, state, disabled } = props
       return jsxs(Field, {
         t,
         id: props.id,
@@ -658,7 +765,10 @@ window.__ModuleLoader__.load({
         onReset: () => props.onReset(control.draft),
         children: [
           jsx(primitives.Switch, {
-            checked: state.text === 'true',
+            // 没覆盖时开关显示**当前生效的那个值**（来自 config.json），而不是一律显示
+            // 关闭 —— 否则「它现在是开着的」这件事在界面上根本看不出来，用户还会点反。
+            // 开关没有灰字可用，所以「是否已覆盖」仍由标签旁的徽标表达。
+            checked: state.overridden ? state.text === 'true' : props.placeholder === 'true',
             disabled,
             label: t(control.labelKey),
             onChange: (next) => props.onEdit(control.draft, next ? 'true' : 'false'),
@@ -686,7 +796,8 @@ window.__ModuleLoader__.load({
               jsx(
                 primitives.Pill,
                 {
-                  active: state.text === choice,
+                  // 与开关同理：没覆盖时高亮的是**当前生效**的那个选项。
+                  active: state.overridden ? state.text === choice : props.placeholder === choice,
                   onClick: disabled ? undefined : () => props.onEdit(control.draft, choice),
                   children: t(choice === 'dedicated' ? 'profileModeDedicated' : 'profileModeShared'),
                 },
@@ -704,7 +815,14 @@ window.__ModuleLoader__.load({
      * @param props - 文案查询 `t`、注入的 `useLinuxDesktopCard` 快照钩子，以及表单动作。
      */
     function LinuxDesktopCard(props) {
+      // 行描述缺失时插件管理器会按 `summary` 渲染这个槽位，而那一份是塞进 `<p>`
+      // 的一行短句 —— 整张卡片塞进去会产出非法嵌套。先于任何 hook 返回，免得白建
+      // 一份表单。短句让页面自己用包描述。
+      if (props.view === 'summary') return null
+
       const { t } = props
+      // 灰字提示每次都现取：它是宿主随 schema 发过来的「清空后会回落到什么」。
+      const placeholders = typeof props.placeholders === 'function' ? props.placeholders() : (props.placeholders ?? {})
       const state = props.useLinuxDesktopCard((snapshot) => snapshot)
       const [open, setOpen] = React.useState(false)
       const saveStarted = React.useRef(false)
@@ -720,14 +838,14 @@ window.__ModuleLoader__.load({
         if (!state.dirty && !state.failed) setOpen(false)
       }, [state.dirty, state.failed, state.saving])
 
-      // 宿主没服务这个命名空间时什么都不渲染 —— 与自带卡片一致，不留空壳。
+      // 宿主没服务这个命名空间时什么都不渲染 —— 与自带配置页一致，不留空壳。
       if (!state.available) return null
 
       const title = t('title')
       const disabled = !state.writable
       const blocked = !state.dirty || state.invalid || state.saving
 
-      return jsxs('li', {
+      return jsxs('div', {
         className: open ? `${CSS.card} ${CSS.cardOpen}` : CSS.card,
         children: [
           jsxs('button', {
@@ -747,7 +865,7 @@ window.__ModuleLoader__.load({
               state.dirty
                 ? jsx(primitives.Tag, { tone: 'neutral', className: CSS.pending, children: t('unsaved') })
                 : null,
-              jsx(primitives.IconChevronDownOutline14, {
+              jsx(ChevronDownIcon, {
                 className: open ? `${CSS.chevron} ${CSS.chevronOpen}` : CSS.chevron,
               }),
             ],
@@ -771,7 +889,9 @@ window.__ModuleLoader__.load({
                           disabled,
                           controls: [control, height],
                           states: [state.fields.windowWidth, state.fields.windowHeight],
+                          placeholders: [placeholders.windowWidth, placeholders.windowHeight],
                           onEdit: props.edit,
+                          onBlur: props.blur,
                           onReset: props.resetField,
                         }),
                       ]
@@ -785,8 +905,10 @@ window.__ModuleLoader__.load({
                       id,
                       control,
                       state: state_,
+                      placeholder: placeholders[control.draft] ?? '',
                       disabled,
                       onEdit: props.edit,
+                      onBlur: props.blur,
                       onReset: props.resetField,
                     }
                     if (control.kind === 'boolean') return [jsx(SwitchControl, shared)]
@@ -837,22 +959,32 @@ window.__ModuleLoader__.load({
       const t = ctx.locale.bind(LOCALE_NS)
       ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-linux-integration: card dictionaries')
 
-      // 设置命名空间的服务名在 DSH 0.1.7 从 `settingsScope` 改成了 `configForms`，
-      // 两个名字都要认。
-      //
-      // 必须用 `ctx.get(...)` 而不是 `ctx.settingsScope?.bind?.(...)`：Cordis 的上下文
-      // 代理在读取**未声明**的服务属性时会直接抛异常（cordis `lib/index.js` 的 get trap
-      // 抛 `cannot get property "<name>" without inject`），可选链根本来不及生效。
+      // 设置表单的共享服务叫 `configForms`（0.1.7 之前叫 `settingsScope`；0.2 起
+      // 只剩 `configForms`）。必须用 `ctx.get(...)`：Cordis 的上下文代理在读取
+      // **未声明**的服务属性时会直接抛异常（`cannot get property "<name>" without
+      // inject`），`ctx.inject([...])` 或可选链都来不及生效。
       //
       // 也不能把它写回 `inject` —— 那样在缺少该服务的宿主上这一行会卡成 pending，
-      // 整个 web 界面起不来（2026-09-24 DSH 更新后就是这个症状：settingsScope 改名，
-      // 插件行等待一个永远不会出现的服务）。
-      const scope =
-        ctx.get('settingsScope')?.bind?.({ namespace: NAMESPACE }) ?? ctx.get('configForms')?.get(NAMESPACE)
-
-      // 宿主没装设置页（两个服务都没有）时不注册卡片，但**绝不向外抛**：
-      // 客户端插件行抛异常会连累整个 web 界面，而这张卡片只是锦上添花。
+      // 整个 web 界面起不来（2026-09-24 就是这么炸的：服务改名，插件行等待一个
+      // 永远不会出现的服务）。找不到就安静跳过：卡片只是锦上添花。
+      const configForms = ctx.get('configForms')
+      const scope = configForms?.get(NAMESPACE)
       if (!scope) return
+
+      // 灰字提示怎么来的：宿主把「清空后会回落到什么」挂在 schema 根节点的 meta 上，
+      // 随 describe 一起发过来。这是 ui-settings 文档里专门留给「schema 内省」的那面
+      // 镜像（`configForms.describe()`），不需要自己走 wire。
+      const mirror = typeof configForms?.describe === 'function' ? configForms.describe() : undefined
+      const readPlaceholders = () => {
+        try {
+          const view = mirror?.getSnapshot?.().view
+          const row = view?.namespaces?.find((candidate) => candidate.ns === NAMESPACE)
+          const schema = row?.schema
+          return schema?.refs?.[schema.uid]?.meta?.[PLACEHOLDER_META] ?? {}
+        } catch {
+          return {}
+        }
+      }
 
       const form = new CardForm(scope)
       const actions = form.actions()
@@ -861,15 +993,15 @@ window.__ModuleLoader__.load({
         fields: Object.fromEntries(DRAFTS.map((draft) => [draft, form.fieldState(draft)])),
       }))
 
-      // keyed slot：key 必须等于宿主注册的 settings 命名空间，否则这张卡永远不会
-      // 被「插件配置」标签页派发。
-      ctx.slots.inject('settings.plugin.item', () =>
+      // keyed slot：键必须是 `<组合包名>#<行 id>`，否则行上不会出现「配置」控件，
+      // 打开了也派发不到这张卡。
+      ctx.slots.inject('plugins.row.config', () =>
         ctx.slots.register(
           {
-            name: 'settings.plugin.item',
-            key: NAMESPACE,
+            name: 'plugins.row.config',
+            key: ROW_KEY,
             locale: LOCALE_NS,
-            inject: () => ({ hooks: { linuxDesktopCard: store }, ...actions }),
+            inject: () => ({ hooks: { linuxDesktopCard: store }, placeholders: readPlaceholders, ...actions }),
           },
           LinuxDesktopCard,
         ),

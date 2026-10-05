@@ -10,8 +10,9 @@
  * 2. **幂等自愈桌面集成**：把桌面入口、图标、启动脚本、KWin 规则同步到当前版本。
  *    内容没变就不碰文件，所以每次启动的额外开销接近于零。
  *
- * 3. **提供设置命名空间**：把配置暴露给 Web 设置页的「桌面集成」卡片。没有这一步
- *    卡片就不会被派发 —— 详见 `src/settings.js`。
+ * 3. **导出 `Config`**：DSH 0.2 起，设置页的表单由 `dsh-settings` 从这个导出
+ *    派生（按行 id 键控，值存进 profile 补丁文档）。不导出这一项，设置页上就
+ *    永远没有本插件的条目 —— 详见 `src/settings.js`。
  *
  * 安全约定（对应需求「不应影响任何 dsh web 本身功能」）：
  *   - 通过 `inject` 声明依赖，缺少 connection / webServer 的 profile（tui、headless）
@@ -27,7 +28,16 @@ import { detectDesktopEnvironment } from './detect.js'
 import { install, pluginVersion } from './installer.js'
 import { resolvePaths } from './paths.js'
 import { clearRuntime, writeRuntime } from './runtime.js'
-import { installSettingsNamespace, settingsBase } from './settings.js'
+import { Config, SETTINGS_NAMESPACE, setPlaceholders, settingsOverlay } from './settings.js'
+
+/**
+ * 本行的 `Config` schema（见 `src/settings.js`）。
+ *
+ * cordis 读它来校验 / 归一化条目配置，`dsh-settings` 读它来派生设置页表单；
+ * 宿主机上没有 schemastery 时它是 `undefined`，此时插件照常加载、只是没有
+ * 设置页那张卡片。
+ */
+export { Config }
 
 /**
  * Cordis 插件名（出现在 Loader 树与诊断里）。
@@ -47,7 +57,8 @@ export const name = 'dsh-lxi'
  *
  * `settings` **刻意不在这里** —— 它只用来提供设置页卡片，属于可选增强。放进
  * 插件级 inject 会让整行在缺少设置服务的部署里停住，连运行时状态都发布不了。
- * 因此它走 `ctx.inject` 的局部注入，见 `installSettingsNamespace`。
+ * 0.7.0 起本行连那个服务都不再需要：表单由 `Config` 导出派生（见
+ * `src/settings.js`），生命周期通知走事件而不是服务依赖。
  */
 export const inject = ['connection', 'webServer']
 
@@ -55,19 +66,33 @@ export const inject = ['connection', 'webServer']
  * Cordis 插件入口。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {object} [config] 本行在 profile 补丁里的 `config:`，已由 cordis 按
+ *   `Config` schema 解析（缺键缺席，不会有默认值填充 —— 见 `src/settings.js`）。
  */
-export function apply(ctx) {
+export function apply(ctx, config) {
   if (process.platform !== 'linux') return
 
   const env = process.env
   const paths = resolvePaths(env)
   const version = pluginVersion()
 
+  /**
+   * 调试输出要不要镜像到 stderr。
+   *
+   * 必须镜像：DSH 的 `ctx.logger` **默认只进内存环形缓冲**（cordis 的 LoggerService
+   * 默认 exporter 只 push 进 buffer，boot 只为「启动失败」收集 warn/error），全树
+   * 没有任何输出到 stdout 的 exporter，`dsh` 也没有 `--verbose` 之类的开关。也就是
+   * 说只走 `ctx.logger` 的诊断**任何地方都看不见** —— 而调试开关的意义正是让人看见。
+   * 镜像后：从桌面图标启动时，启动器的 `>>"$LOG_FILE" 2>&1` 会把它落到
+   * `$XDG_RUNTIME_DIR/dsh-lxi-web.log`（见 `src/assets/launcher.sh.tpl`）。
+   */
+  const debug = env.DSH_DESKTOP_DEBUG === '1'
+
   const log = (...args) => {
     try {
       const logger = ctx.logger?.('dsh-lxi')
       if (logger?.info) logger.info(...args)
-      else if (env.DSH_DESKTOP_DEBUG === '1') console.error('[dsh-lxi]', ...args)
+      if (debug) console.error('[dsh-lxi]', ...args)
     } catch {
       // 日志本身绝不能成为失败源。
     }
@@ -76,15 +101,16 @@ export function apply(ctx) {
     try {
       const logger = ctx.logger?.('dsh-lxi')
       if (logger?.warn) logger.warn(...args)
-      else if (env.DSH_DESKTOP_DEBUG === '1') console.error('[dsh-lxi]', ...args)
+      if (debug) console.error('[dsh-lxi]', ...args)
     } catch {
       /* ignore */
     }
   }
 
   // ---- 生效配置 ----------------------------------------------------------
-  // 每次现读 config.json（用户可能正拿着编辑器改），再叠上设置层的覆盖。
-  // 设置层还没接上时覆盖层是空的，行为与 0.1.x 完全一致。
+  // 每次现读 config.json（用户可能正拿着编辑器改），再叠上 DSH 设置层的覆盖。
+  // 覆盖层只包含「真在设置文档里出现过的键」，所以 config.json 里没被设置页
+  // 动过的字段继续说了算；没有设置文档时覆盖层是空的，行为与本改动之前一致。
   let warnedAboutFile = false
   const fileConfig = () => {
     const result = readConfig(paths)
@@ -92,9 +118,29 @@ export function apply(ctx) {
       warnedAboutFile = true
       for (const warning of result.warnings) warn(warning)
     }
+    // 每次读到 config.json 就把「清空后会回落到什么」刷进 schema 的根 meta：
+    // 设置页里的灰字提示读的就是它（纯显示信息，不参与配置解析）。
+    try {
+      setPlaceholders(Config, result.config)
+    } catch (error) {
+      warn(`刷新设置页灰字提示失败：${error?.message ?? String(error)}`)
+    }
     return result.config
   }
-  let readOverlay = () => ({})
+  /**
+   * 读设置层覆盖。
+   *
+   * 每次都重新解包：`Config` 是 volatile 的，cordis 会原地更新那个引用，所以
+   * 不能在 apply 里把值取出来存着。
+   */
+  const readOverlay = () => {
+    try {
+      return settingsOverlay(config)
+    } catch (error) {
+      warn(`读取设置覆盖层失败：${error?.message ?? String(error)}`)
+      return {}
+    }
+  }
   const effectiveConfig = () => ({ ...fileConfig(), ...readOverlay() })
 
   // ---- 幂等自愈桌面集成 --------------------------------------------------
@@ -122,6 +168,43 @@ export function apply(ctx) {
     } catch (error) {
       // 自动安装失败绝不能让 dsh web 起不来。
       warn(`桌面集成自动安装异常：${error?.message ?? String(error)}`)
+    }
+  }
+
+  /**
+   * 诊断：本行到底有没有被 `dsh-settings` 报成一张设置表单。
+   *
+   * 为什么值得专门写一条：设置界面「静默消失」是这个项目踩过两次的坑（0.6.0 漏改
+   * 行 id；0.2 换了整套机制），而它在界面上**没有任何报错** —— 只有真人在意到
+   * 「怎么没有那张卡片」才发现。宿主这一侧是唯一能看到真相的地方。
+   *
+   * 只在 `DSH_DESKTOP_DEBUG=1` 时跑，且必须在 Loader 树落定之后（describe() 会
+   * 跳过还没进入 active 的条目，包括本行自己）。
+   */
+  const probeSettingsForm = () => {
+    if (env.DSH_DESKTOP_DEBUG !== '1') return
+    try {
+      ctx.inject(['settings'], (settingsCtx) => {
+        try {
+          const descriptors = settingsCtx.settings.describe() ?? []
+          const mine = descriptors.find((row) => row.ns === SETTINGS_NAMESPACE)
+          if (mine) {
+            log(
+              `设置表单已就绪：ns=${mine.ns} autoGenerate=${String(mine.autoGenerate)} ` +
+                `applies=${String(mine.applies)} revision=${String(mine.revision)}`,
+            )
+          } else {
+            warn(
+              `设置表单缺失：dsh-settings 没有报出 ${SETTINGS_NAMESPACE} —— ` +
+                '检查 Config 导出与补丁里的行 id 是否一致',
+            )
+          }
+        } catch (error) {
+          warn(`读取设置表单描述符失败：${error?.message ?? String(error)}`)
+        }
+      })
+    } catch (error) {
+      warn(`接入 settings 服务失败：${error?.message ?? String(error)}`)
     }
   }
 
@@ -160,7 +243,10 @@ export function apply(ctx) {
       const settled = typeof loader?.await === 'function' ? loader.await() : undefined
       if (settled && typeof settled.then === 'function') {
         settled.then(
-          () => publish('after-loader'),
+          () => {
+            publish('after-loader')
+            probeSettingsForm()
+          },
           () => warn('等待 Loader 树落定失败，运行时状态仅保留了即时发布的那一份'),
         )
       }
@@ -179,30 +265,25 @@ export function apply(ctx) {
     }
   })
 
-  // ---- 设置命名空间 ------------------------------------------------------
-  // 先装一次，保证「设置层可用与否」都不影响桌面集成的自愈。
+  // ---- 首次自愈 + 设置变更通知 -------------------------------------------
+  // 先装一次：设置层可用与否都不影响桌面集成的自愈。
   autoInstall()
 
-  installSettingsNamespace(ctx, {
-    base: settingsBase(fileConfig()),
-    setSource: (getter) => {
-      readOverlay = () => {
-        try {
-          return (typeof getter === 'function' ? getter() : null) ?? {}
-        } catch (error) {
-          warn(`读取设置覆盖层失败：${error?.message ?? String(error)}`)
-          return {}
-        }
-      }
-    },
-    // 设置层标记为 live，所以卡片一保存就应当生效。install 是幂等的，
-    // 内容没变就不碰文件，重跑一次的代价只是一次比对。
-    onChange: () => {
-      log('设置已更新，重新同步桌面集成')
+  // DSH 把设置写进 profile 补丁之后，**本行不会被重启**：cordis-plugin-loader 的
+  // `_commitVolatile()` 对「只有 volatile 值变了」的更新走原地写入
+  // （`updateVolatile(ref, source)` → `ref[write](source.get())`），并 emit
+  // `loader/volatile-update`。本插件的 schema 是**根节点整体 volatile**，所以每一次
+  // 保存都属于这种情况 —— 这个监听器因此不是冗余保险，而是「保存后立即生效」的
+  // **唯一通路**：`readOverlay()` 每次现读那个引用，拿到的一定是新值。
+  //
+  // 不发日志：首次 describe() 也会发一次（revision 从「没见过」变成 0），那不是
+  // 用户改动；而 install 本身会把结果写进日志（「已是最新」/「已安装 / 更新完成」）。
+  try {
+    ctx.on('settings/document-updated', (namespace) => {
+      if (namespace !== SETTINGS_NAMESPACE) return
       autoInstall()
-    },
-    warn,
-  }).catch((error) => {
-    warn(`接入设置层异常：${error?.message ?? String(error)}`)
-  })
+    })
+  } catch (error) {
+    warn(`订阅设置变更失败：${error?.message ?? String(error)}`)
+  }
 }

@@ -18,7 +18,7 @@ This plugin addresses all three. It does five things:
 2. Opens a window using Chromium's `--app` mode, containing only the dsh web interface — no address bar, tabs, or bookmarks bar.
 3. Starts `dsh web` when it is not running, and stops the service it started once the window closes.
 4. Maintains those files idempotently: every `dsh web` boot syncs them to the current version, and leaves them untouched when nothing changed.
-5. Contributes a "Desktop integration" card to the Web settings page under Plugins → Plugin configuration, for editing the configuration below.
+5. Contributes its own configuration entry to the Web **Plugins** page in the sidebar (the `dsh-linux-integration` card → the `dsh-lxi` row's **Configure** control), for editing the configuration below.
 
 ## Requirements
 
@@ -134,7 +134,7 @@ The config file is `~/.config/dsh-lxi/config.json`, created automatically on fir
 There are three ways to change the configuration. The first is recommended:
 
 ```bash
-# 1. From the Web settings page: Plugins -> Plugin configuration -> Desktop integration.
+# 1. From the Web UI: sidebar "Plugins" -> dsh-linux-integration -> the dsh-lxi row's "Configure". Changes apply on save.
 #    Saving takes effect immediately.
 # 2. Edit directly, then reinstall
 $EDITOR ~/.config/dsh-lxi/config.json
@@ -144,18 +144,26 @@ dsh plugin --profile web exec dsh-lxi install
 dsh plugin --profile web exec dsh-lxi set window 1400x900
 ```
 
-### The settings card and config.json
+### The configuration card and config.json
 
-The card writes to DSH's settings layer (this plugin's namespace is `dsh-lxi`), which layers **on top of** `config.json`: the effective value is schema defaults → `config.json` → the user layer. An existing `config.json` therefore keeps working and needs no migration; a field the card changed shows as "Overridden", and "Reset" drops it back to the `config.json` value.
+The card writes to DSH's **settings layer**, which layers **on top of** `config.json`:
+
+```text
+effective value = config.json -> DSH settings layer (only the keys you actually changed on the card)
+```
+
+An existing `config.json` therefore keeps working and needs **no migration**; a field the card changed shows as "Overridden", and "Reset" drops it back to the `config.json` value; **a field you never touched is empty, and the grey text inside that empty input is what clearing it would fall back to** (the current `config.json` value), disappearing the moment you type. Switches and the two-way choice have no grey text to use, so they show the value currently in effect instead — the presence or absence of the "Overridden" badge is what tells you whether the field was changed.
+
+The window width and height only accept integers in 320–20000. Since the box starts empty and every size therefore begins with `1`, the invalid flag is **deferred until the input loses focus** (turning red mid-word means nothing); the **Save button stays disabled while a value is invalid** — when to show red and what to block are two separate judgements.
+
+Those values do not live in this plugin's config directory but in the profile patch document: `~/.dsh/profiles/<name>/cordis.patch.yml`, under `- id: dsh-lxi` + `config:`, read and written by DSH itself.
 
 `host` and `port` are not on the card. They must match the address `dsh web` actually binds, so `config.json` remains their only source.
 
-The card depends on `@deepseek-ai/schemastery` (installed as a dependency). If you installed from a local checkout (`link:`) and that package is unavailable, the card does not appear; the rest of the desktop integration works as usual.
+The card depends on `@deepseek-ai/schemastery` (installed as a dependency). If you installed from a local checkout (`link:`) and that package is unavailable, the plugin falls back to the copy inside the **running dsh installation**; when neither path works the card does not appear, and the rest of the desktop integration works as usual.
 
-> ⚠️ **Known issue: on DSH 0.2.x this card no longer appears.**
-> DSH 0.2 replaced the settings mechanism — the old `settings.yaml` model, where a plugin picked its own namespace, is gone. Forms are now derived from a `Config` schema the plugin exports, keyed by the plugin's row id, and stored in the profile patch document. `ctx.settings.installSection` no longer exists in that API.
-> This plugin has not been ported yet, so that call fails and is swallowed by its internal `try/catch`: **only this card disappears — the rest of the desktop integration is unaffected** (`dsh web` will not fail to start because of it). Porting is scheduled separately.
-> Until then, change settings through `config.json` or `dsh-lxi set`; neither is affected.
+> **The configuration UI requires DSH 0.2+.**
+> 0.2 replaced the whole settings mechanism — the old "plugin picks its own namespace + `settings.yaml`" model is gone. Forms are now derived from a `Config` schema the plugin exports, **keyed by the plugin's row id**, stored in the profile patch document, and the UI moved from the settings page to the sidebar's Plugins page. This plugin only speaks the new mechanism as of 0.7.0, so **there is no configuration UI on 0.1.x hosts**; `dsh-lxi set` and editing `config.json` work on every version.
 
 ### profileMode
 
@@ -272,7 +280,7 @@ Keeps `~/.config/dsh-lxi/`, which holds the configuration and backups.
 
 | Dimension | Status |
 |---|---|
-| DSH | **Verified**: 0.1.7-rc.1 (client settings service `configForms`). **Backward compatible**: hosts older than 0.1.7 that still expose `settingsScope` also work |
+| DSH | **Verified**: 0.2.0-rc.2 (settings forms derived from `Config` by row id, card mounted at `plugins.row.config`). The rest of the desktop integration works on older versions, but **the configuration UI requires 0.2+** |
 | Desktop environment | **Verified**: KDE Plasma 6. **Partially verified**: Hyprland 0.56.2 (app_id derivation and the window size rule are measured — see "Hyprland and window size"; the desktop entry under a full session is not verified). **Partially verified**: GNOME / Mutter 50.5 (window sizing behaviour is measured — see "GNOME and window size"; the desktop entry under a full session is not verified). **Expected to work, not verified**: Sway and other wlroots compositors, Xfce, MATE, Cinnamon, i3 — the window and desktop entry are standard XDG, and window rules are only written on KDE and Hyprland |
 | Display protocol | **Verified**: Wayland. **Expected to work, not verified**: X11 |
 | Browser | **Verified**: Google Chrome. **Expected to work, not verified**: Chromium, Brave, Edge, Vivaldi, Opera |
@@ -303,14 +311,14 @@ dsh plugin --profile web exec dsh-lxi doctor
 | The service was just auto-started and the window takes tens of seconds to appear | Deliberate: the auto-start path waits for the `dsh web:` settled line and then for a session-API probe to succeed before opening the window. The larger the server's plugin set, the longer that wait; when the window does appear the backend is guaranteed ready. |
 | The server is still running after the window closes | You are in `shared` mode, or the service was started elsewhere and is deliberately not taken over. Use `dedicated` and start the service from the desktop icon. |
 | Boot fails with `dsh-linux-integration: pending (waiting for service: settingsScope)` and `dsh web` will not start | DSH 0.1.7 renamed the settings service from `settingsScope` to `configForms`, and 0.4.1 and earlier wait forever for the old name. Upgrade to 0.4.2 or later. |
-| No "Desktop integration" card under Plugin configuration | The Host did not register the namespace. Confirm `dsh web` has been restarted and that `@deepseek-ai/schemastery` can be loaded; for a local-checkout install see "The settings card and config.json" above. |
+| No "Configure" control for this plugin on the sidebar Plugins page, or the page is empty | The Host did not report this row as a settings form (`describe()` only accepts rows that have a `Config` with at least one volatile field). Start with `DSH_DESKTOP_DEBUG=1` to see this plugin's diagnostics: launched from the desktop icon they land in `$XDG_RUNTIME_DIR/dsh-lxi-web.log` (the launcher redirects the service's stdout/stderr there), and when you run `dsh web` directly they are on stderr. The log says it outright: `设置表单已就绪：ns=dsh-lxi …` or `设置表单缺失 …`. Common causes: `@deepseek-ai/schemastery` is unreachable along both paths (see "The configuration card and config.json" above), or the row id in the patch does not match the `Config` export. |
 
 ## Development
 
 Run these from the repository root:
 
 ```bash
-node test/smoke.mjs                                   # smoke tests, 169 checks total, zero dependencies
+node test/smoke.mjs                                   # smoke tests, 180 checks total, zero dependencies
 node scripts/prepublish-check.mjs                     # pre-publish validation
 npm pack --dry-run                                    # validate the package contents
 node bin/dsh-lxi.js install --root /tmp/sandbox   # sandboxed install, touches nothing real

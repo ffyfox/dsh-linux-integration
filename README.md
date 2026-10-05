@@ -18,7 +18,7 @@
 2. 用 Chromium 的 `--app` 模式打开窗口，窗口中只有 dsh web 界面，没有地址栏、标签页或书签栏。
 3. 在 `dsh web` 未运行时启动它，并在窗口关闭后停止由自己启动的服务。
 4. 幂等地维护上述文件：`dsh web` 每次启动时同步到当前版本，内容未变化时不改动文件。
-5. 在 Web 设置页的「插件 → 插件配置」里提供一张「桌面集成」卡片，用于编辑下面那组配置。
+5. 在 Web 侧栏的**插件**页里为它自己提供一个配置入口（`dsh-linux-integration` 卡片 → 行 `dsh-lxi` 的**配置**），用于编辑下面那组配置。
 
 ## 系统要求
 
@@ -134,7 +134,7 @@ dsh plugin --profile web exec dsh-lxi <子命令>
 修改配置有三种方式。推荐第一种：
 
 ```bash
-# 1. 在 Web 设置页里改：插件 → 插件配置 → 桌面集成。保存后立即生效。
+# 1. 在 Web 界面里改：侧栏「插件」→ dsh-linux-integration → 行 dsh-lxi 的「配置」。保存后立即生效。
 # 2. 直接编辑后重新安装
 $EDITOR ~/.config/dsh-lxi/config.json
 dsh plugin --profile web exec dsh-lxi install
@@ -145,16 +145,24 @@ dsh plugin --profile web exec dsh-lxi set window 1400x900
 
 ### 设置页卡片与 config.json 的关系
 
-卡片写入的是 DSH 的设置层（本插件的命名空间 `dsh-lxi`），它叠在 `config.json` **之上**：生效值 = schema 默认值 → `config.json` → 设置层用户覆盖。因此已有的 `config.json` 继续生效，不需要迁移；卡片里改过的字段会显示「已覆盖」，点「重置」即回落到 `config.json` 的值。
+卡片写入的是 DSH 的**设置层**，它叠在 `config.json` **之上**：
+
+```text
+生效值 = config.json → DSH 设置层（只包含你在卡片里真正改过的键）
+```
+
+因此已有的 `config.json` 继续生效，**不需要迁移**；卡片里改过的字段会显示「已覆盖」，点「重置」即回落到 `config.json` 的值；**没动过的字段是空的，空输入框里的灰字就是「清空后会回落到什么」**（也就是 `config.json` 里的当前值），一开始输入就消失。开关与二选一没有灰字可用，直接显示当前生效值 —— 有没有「已覆盖」徽标才是「是否被改过」的判据。
+
+窗口宽高只接受 320–20000 的整数。既然框是空的、任何尺寸都得从 `1` 敲起，非法提示**推迟到输入框失焦之后**才显示（边敲边红没有意义）；但**值非法时保存按钮始终是禁用的** —— 判红时机与拦截判据是两件事。
+
+设置层的值不存在本插件的配置目录里，而存在 profile 补丁文档里 —— `~/.dsh/profiles/<名>/cordis.patch.yml` 的 `- id: dsh-lxi` + `config:`，由 DSH 自己读写。
 
 `host` 与 `port` 不在卡片里。它们必须与 `dsh web` 实际绑定的地址一致，只由 `config.json` 决定。
 
-卡片依赖 `@deepseek-ai/schemastery`（安装时会作为依赖装上）。若用本地检出（`link:`）方式安装且该包不可用，卡片不会出现，桌面集成其余部分照常工作。
+卡片依赖 `@deepseek-ai/schemastery`（安装时会作为依赖装上）。若用本地检出（`link:`）方式安装且该包不可用，插件会退回去从**正在运行的那个 dsh 安装目录**里找一份；两条路都不通时卡片不出现，桌面集成其余部分照常工作。
 
-> ⚠️ **已知问题：DSH 0.2.x 上这张卡片不再出现。**
-> DSH 0.2 换掉了设置机制 —— `settings.yaml` 那套「插件自选命名空间」的模型被移除，改成由插件导出的 `Config` schema **按插件行 id 自动派生表单**，值存进 profile 补丁文档；`ctx.settings.installSection` 这个方法在新版里已经不存在。
-> 本插件尚未适配，那次调用会失败并被内部的 `try/catch` 吞掉，所以**只有这张卡片消失，桌面集成其余功能一切照常**（`dsh web` 不会因此起不来）。适配单独排期。
-> 在此之前请用 `config.json` 或 `dsh-lxi set` 改配置 —— 这两条路都不受影响。
+> **设置界面需要 DSH 0.2+。**
+> 0.2 把设置机制整体换掉了 —— 旧的「插件自选命名空间 + `settings.yaml`」模型被移除，改成由插件导出的 `Config` schema **按插件行 id** 派生，值存进 profile 补丁文档，界面也从设置页搬到了侧栏的插件页。本插件 0.7.0 起只走新机制，**0.1.x 宿主上没有设置界面**；`dsh-lxi set` 与编辑 `config.json` 这两条路在哪个版本上都可用。
 
 ### profileMode
 
@@ -271,7 +279,7 @@ dsh plugin --profile web exec dsh-lxi uninstall
 
 | 维度 | 状态 |
 |---|---|
-| DSH | **已验证**：0.1.7-rc.1（客户端设置服务 `configForms`）。**向后兼容**：0.1.7 之前用 `settingsScope` 的宿主同样可用 |
+| DSH | **已验证**：0.2.0-rc.2（设置表单按行 id 从 `Config` 派生，卡片挂 `plugins.row.config`）。桌面集成的其余功能在更早版本上照常，但**设置界面需要 0.2+** |
 | 桌面环境 | **已验证**：KDE Plasma 6。**部分验证**：Hyprland 0.56.2（app_id 推导与窗口尺寸规则已实测，见「Hyprland 与窗口尺寸」；完整桌面会话下的桌面入口未验证）。**部分验证**：GNOME / Mutter 50.5（窗口尺寸行为已实测，见「GNOME 与窗口尺寸」；完整桌面会话下的桌面入口未验证）。**预期可用但未验证**：Sway 等其它 wlroots 系、Xfce、MATE、Cinnamon、i3 —— 窗口与桌面入口均为标准 XDG，窗口规则只在 KDE 与 Hyprland 下写入 |
 | 显示协议 | **已验证**：Wayland。**预期可用但未验证**：X11 |
 | 浏览器 | **已验证**：Google Chrome。**预期可用但未验证**：Chromium、Brave、Edge、Vivaldi、Opera |
@@ -302,14 +310,14 @@ dsh plugin --profile web exec dsh-lxi doctor
 | 服务是刚由启动器拉起的，窗口要等十几秒才出现 | 有意的：自启路径会先等 `dsh web:` 落定行，再等一次会话 API 探测成功，两道都过才开窗。服务端插件集越大，这段等待越长；窗口出现时后端一定是可用的。 |
 | 关闭窗口后服务仍在运行 | 当前为 `shared` 模式，或服务由别处启动，本插件不接管。改用 `dedicated` 并从桌面图标启动服务。 |
 | 启动时报 `dsh-linux-integration: pending (waiting for service: settingsScope)`，`dsh web` 起不来 | DSH 0.1.7 起把设置服务从 `settingsScope` 改名成了 `configForms`，0.4.1 及更早的版本会一直等那个不存在的服务。升级到 0.4.2 及以上。 |
-| 设置页「插件配置」里没有「桌面集成」卡片 | 宿主没注册命名空间。确认 `dsh web` 已重启过，且 `@deepseek-ai/schemastery` 可被加载；本地检出方式安装时见上文「设置页卡片与 config.json 的关系」。 |
+| 侧栏「插件」页里没有本插件的「配置」入口，或配置页是空的 | 宿主没把这一行报成设置表单（`describe()` 只认「有 `Config` 且至少有一个 volatile 字段」的行）。用 `DSH_DESKTOP_DEBUG=1` 启动即可看到本插件的诊断：从桌面图标启动时它落在 `$XDG_RUNTIME_DIR/dsh-lxi-web.log`（启动器把服务的 stdout/stderr 重定向到那里），直接跑 `dsh web` 时就在 stderr 上。日志会直说 `设置表单已就绪：ns=dsh-lxi …` 或 `设置表单缺失 …`。常见原因：`@deepseek-ai/schemastery` 两条路都加载不到（本地检出安装时见上文），或补丁里的行 id 与 `Config` 导出对不上。 |
 
 ## 开发
 
 在仓库根目录执行：
 
 ```bash
-node test/smoke.mjs                                   # 冒烟测试，用例共 169 项，零依赖
+node test/smoke.mjs                                   # 冒烟测试，用例共 180 项，零依赖
 node scripts/prepublish-check.mjs                     # 发布前校验
 npm pack --dry-run                                    # 校验打包产物
 node bin/dsh-lxi.js install --root /tmp/sandbox   # 沙箱安装，不触碰真实目录
